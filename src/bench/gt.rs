@@ -281,6 +281,8 @@ pub fn publish_armor_gt(
     child_of: Query<&ChildOf>,
     hierarchy: HierarchyQuery,
     centers: Query<&GlobalTransform>,
+    camera: Query<&GlobalTransform, With<crate::capture::CaptureSource>>,
+    spatial: avian3d::prelude::SpatialQuery,
 ) {
     let sim_time_ns = scenario_time_ns(scenario.as_deref());
     // Same one-frame leak as `/sim/gt/robots`: a robot that is declared absent
@@ -320,6 +322,20 @@ pub fn publish_armor_gt(
             .mul_vec3(Vec3::X);
         let (plate_w, plate_h) = plate_size(armor.spec.armor_type());
 
+        let camera_transform = camera.iter().next();
+        let line_of_sight_clear = camera_transform.is_some_and(|camera| {
+            let delta = center.translation - camera.translation();
+            let distance = delta.length();
+            let Ok(direction) = Dir3::new(delta) else { return false; };
+            // Vehicle root colliders are envelopes, not optical meshes. Ignore
+            // ego and this target's envelope; plate facing handles the convex
+            // target itself. Environment/other robots can occlude the sightline.
+            spatial.cast_ray_predicate(camera.translation(), direction,
+                (distance - 0.02).max(0.0), true,
+                &avian3d::prelude::SpatialQueryFilter::default(),
+                &|collider| !robot_of(collider, &robot_ids, &child_of)
+                    .is_some_and(|owner| owner.0 == 0 || owner == robot_id)).is_none()
+        });
         armors.push(SimArmorState {
             header: header(&stamp),
             sim_time_ns,
@@ -334,6 +350,8 @@ pub fn publish_armor_gt(
             normal: ros_vec3(to_ros_vec3(normal_bevy)),
             plate_w,
             plate_h,
+            line_of_sight_clear,
+            visibility_valid: camera_transform.is_some(),
         });
     }
 

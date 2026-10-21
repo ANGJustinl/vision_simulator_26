@@ -13,6 +13,14 @@ use crate::robomaster::prelude::Projectile;
 use crate::statistic::ProjectileStatistics;
 use crate::systems::{ControllerState, request_controller_rumble};
 
+/// Granted only around a fresh ROS launch attempt; local inputs cannot use it.
+#[derive(Resource, Default)]
+pub(crate) struct IntegrationShotPermit {
+    pub authorized: bool,
+    pub stamp_ns: i128,
+    pub last_launch: Option<std::time::Instant>,
+}
+
 pub fn setup_projectile(
     mut commands: Commands,
     config: Res<SimulationConfig>,
@@ -54,7 +62,31 @@ pub fn projectile_launch(
         (With<Controlled>, Without<InfantryChassis>),
     >,
     launch_offset: Single<&Transform, (With<Controlled>, With<InfantryLaunchOffset>)>,
+    muzzle_world: Single<&GlobalTransform, (With<Controlled>, With<InfantryLaunchOffset>, Without<InfantryGimbal>)>,
+    permit: Option<ResMut<IntegrationShotPermit>>,
+    #[cfg(feature = "bench")] scenario: Option<Res<crate::bench::scenario::Scenario>>,
 ) {
+    if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|value| value == "1") {
+        let Some(mut permit) = permit else { return; };
+        let authorized = std::mem::take(&mut permit.authorized);
+        let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_nanos() as i128;
+        let rate = std::env::var("DAEDALUS_INTEGRATION_FIRE_RATE_HZ").ok()
+            .and_then(|value| value.parse::<f64>().ok()).unwrap_or(2.0);
+        if !rate.is_finite() || rate <= 0.0 || rate > 5.0 { return; }
+        if !authorized || std::env::var("DAEDALUS_INTEGRATION_FIRE").as_deref() != Ok("auto")
+            || now_ns - permit.stamp_ns > 250_000_000 || permit.stamp_ns > now_ns + 10_000_000
+            || permit.last_launch.is_some_and(|last| last.elapsed() < Duration::from_secs_f64(1.0/rate)) {
+            return;
+        }
+        #[cfg(feature = "bench")]
+        if !scenario.as_ref().is_some_and(|s| s.phase == crate::bench::scenario::Phase::Running) {
+            return;
+        }
+        // The ROS path already advances the mechanical cooldown each frame.
+        if !cooldown.is_finished() { return; }
+        permit.last_launch = Some(std::time::Instant::now());
+    }
     cooldown.tick(time.delta());
     if !cooldown.is_finished() {
         return;
@@ -69,7 +101,7 @@ pub fn projectile_launch(
         return;
     }
     let vel = infantry.1.0 + direction * config.projectile.speed;
-    commands.spawn((
+    let mut projectile = commands.spawn((
         RigidBody::Dynamic,
         Collider::sphere(config.projectile.diameter / 2.0),
         Mass(config.projectile.mass),
@@ -77,19 +109,21 @@ pub fn projectile_launch(
         Restitution::new(0.3),
         LinearDamping(config.projectile.linear_damping),
         GameLayer::projectile_collision_layers(true),
+        if std::env::var("DAEDALUS_PROJECTILE_VISIBLE").as_deref()==Ok("off") {Visibility::Hidden} else {Visibility::Inherited},
         Mesh3d(setting.0.clone()),
         MeshMaterial3d(setting.1.clone()),
         LinearVelocity(vel),
         AngularVelocity(infantry.2.0),
-        Transform::IDENTITY.with_translation(
-            infantry.0.translation + (gimbal.0.rotation() * launch_offset.translation),
-        ),
+        Transform::IDENTITY.with_translation(muzzle_world.translation()),
         ProjectileLifetime(Timer::from_seconds(
             config.projectile.lifetime,
             TimerMode::Once,
         )),
         Projectile,
     ));
+    if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|value| value == "1") {
+        projectile.insert((Sensor, SpeculativeMargin::ZERO, CollisionMargin(0.0)));
+    }
     request_controller_rumble(
         controller.as_deref(),
         &mut rumble_requests,

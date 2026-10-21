@@ -13,6 +13,9 @@ fn handle_armor_collision(
     armors: Query<(), With<Armor>>,
     child_of: Query<&ChildOf>,
 ) {
+    // Integration hit events and statistics come from actual contact manifolds,
+    // never CollisionEnd (which can close a speculative, non-touching pair).
+    if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|v| v == "1") { return; }
     let projectile_body1 = event.body1.and_then(|body| projectiles.get(body).ok());
     let projectile_body2 = event.body2.and_then(|body| projectiles.get(body).ok());
 

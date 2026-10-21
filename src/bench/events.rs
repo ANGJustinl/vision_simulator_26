@@ -622,6 +622,7 @@ pub fn handle_shot_end(
     armor_contacts: Res<ArmorContactSet>,
     mut resolved: ResMut<ResolvedShots>,
 ) {
+    if crate::bench::strict_hits::enabled() { return; }
     let projectile_body1 = event.body1.and_then(|body| projectiles.get(body).ok());
     let projectile_body2 = event.body2.and_then(|body| projectiles.get(body).ok());
     // Pick the *other* collider from the side that is **not** the projectile.

@@ -65,6 +65,7 @@ use crate::ros2::prelude::AverageRateLimiter;
 
 pub const LOAD_SERVICE: &str = "/sim/scenario/load";
 pub const START_SERVICE: &str = "/sim/scenario/start";
+pub const BEGIN_SERVICE: &str = "/sim/scenario/begin";
 pub const RESET_SERVICE: &str = "/sim/scenario/reset";
 
 /// One queued service call. Holds the reply handle so the answer is sent from the
@@ -76,6 +77,9 @@ pub enum ScenarioRequest {
         reply: r2r::ServiceRequest<SimScenarioLoad::Service>,
     },
     Start {
+        reply: r2r::ServiceRequest<SimScenarioStart::Service>,
+    },
+    Begin {
         reply: r2r::ServiceRequest<SimScenarioStart::Service>,
     },
     Reset {
@@ -163,7 +167,22 @@ pub fn register_services(signal: Arc<AtomicBool>, app: &mut App, node: &mut r2r:
         Err(error) => error!("[bench] cannot create {RESET_SERVICE}: {error}"),
     }
 
-    info!("[bench] scenario services up: {LOAD_SERVICE}, {START_SERVICE}, {RESET_SERVICE}");
+    // Same empty request/status response as start, with a separate endpoint so
+    // the existing full-reset contract of /start remains unchanged.
+    match node.create_service::<SimScenarioStart::Service>(BEGIN_SERVICE, QosProfile::default()) {
+        Ok(mut stream) => {
+            let queue = queue.clone();
+            let signal = signal.clone();
+            std::thread::spawn(move || {
+                while !signal.load(Ordering::Acquire) {
+                    let Some(request) = block_on(futures_lite::StreamExt::next(&mut stream)) else { break; };
+                    queue.push(ScenarioRequest::Begin { reply: request });
+                }
+            });
+        }
+        Err(error) => error!("[bench] cannot create {BEGIN_SERVICE}: {error}"),
+    }
+    info!("[bench] scenario services up: {LOAD_SERVICE}, {START_SERVICE}, {RESET_SERVICE}, {BEGIN_SERVICE}");
 }
 
 /// Applies queued service calls, ordered before `scenario_control`.
@@ -296,6 +315,18 @@ pub fn poll_scenario_services(
                         spawn_applied,
                     },
                 );
+            }
+            ScenarioRequest::Begin { reply } => {
+                let (scenario_id, _, _, spawn_applied) = snapshot(scenario.as_deref());
+                let (success, message, phase) = match scenario.as_mut() {
+                    Some(scene) if scene.phase == Phase::Idle && scene.ready()
+                        && scene.pending == scenario::ScenarioCommand::None => {
+                        scene.pending = scenario::ScenarioCommand::Begin;
+                        (true, String::new(), Phase::Running.wire())
+                    }
+                    _ => (false, "begin requires a ready Idle scene; load and prepare it first".to_string(), Phase::Idle.wire()),
+                };
+                respond(reply, SimScenarioStart::Response { success, message, scenario_id, phase, spawn_applied });
             }
             ScenarioRequest::Reset { reply } => {
                 // Idempotent: with no scenario running this still succeeds.

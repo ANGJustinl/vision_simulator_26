@@ -1,7 +1,8 @@
 use bevy::prelude::*;
+use bevy::transform::helper::TransformHelper;
 
 use crate::components::{Controlled, InfantryChassis, InfantryGimbal, InfantryLaunchOffset};
-use crate::config::{GimbalAxisPidConfig, SimulationConfig};
+use crate::config::{GimbalAxisPidConfig, GimbalPidConfig, SimulationConfig};
 
 /// Absolute muzzle-frame aim target produced by an external auto-aim solver.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +68,15 @@ pub struct GimbalAimTracker {
     target: GimbalAimTarget,
     yaw: AxisPid,
     pitch: AxisPid,
+    command_stamp_ns: Option<i128>,
+    accepted_wall_ns: i128,
+    last_command_at: Option<std::time::Instant>,
+    feedforward: Vec2,
+    control_steps: u64,
+    last_dt: f32,
+    last_error: Vec2,
+    last_feedback: Vec2,
+    last_feedforward: Vec2,
 }
 
 impl GimbalAimTracker {
@@ -75,6 +85,15 @@ impl GimbalAimTracker {
             target,
             yaw: AxisPid::default(),
             pitch: AxisPid::default(),
+            command_stamp_ns: None,
+            accepted_wall_ns: 0,
+            last_command_at: None,
+            feedforward: Vec2::ZERO,
+            control_steps: 0,
+            last_dt: 0.0,
+            last_error: Vec2::ZERO,
+            last_feedback: Vec2::ZERO,
+            last_feedforward: Vec2::ZERO,
         }
     }
 
@@ -86,6 +105,38 @@ impl GimbalAimTracker {
     /// drives one continuous controller instead of restarting every message.
     pub fn retarget(&mut self, target: GimbalAimTarget) {
         self.target = target;
+    }
+
+    /// Feedforward uses only timestamped solver angles, never simulator truth.
+    pub fn retarget_stamped(&mut self, target: GimbalAimTarget, stamp_ns: i128, config: &GimbalPidConfig) {
+        let delta = Vec2::new(wrap_angle(target.yaw-self.target.yaw), wrap_angle(target.pitch-self.target.pitch));
+        if let Some(previous) = self.command_stamp_ns {
+            let dt = (stamp_ns-previous) as f32 * 1e-9;
+            if dt > 0.001 && dt <= config.feedforward_reset_gap_s
+                && delta.abs().max_element() <= config.feedforward_max_step_rad {
+                let limit = config.feedforward_max_rate.max(0.0);
+                let raw = (delta/dt).clamp(Vec2::splat(-limit), Vec2::splat(limit));
+                let alpha = 1.0-(-dt/config.feedforward_tau_s.max(0.001)).exp();
+                self.feedforward += (raw-self.feedforward)*alpha;
+            } else {
+                self.feedforward = Vec2::ZERO;
+            }
+        }
+        self.command_stamp_ns = Some(stamp_ns);
+        self.accepted_wall_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_nanos() as i128;
+        self.last_command_at = Some(std::time::Instant::now());
+        self.retarget(target);
+    }
+
+    pub fn diagnostic(&self) -> serde_json::Value {
+        serde_json::json!({"command_stamp_ns":self.command_stamp_ns,
+            "accepted_wall_ns":self.accepted_wall_ns,"target_yaw_rad":self.target.yaw,
+            "target_pitch_rad":self.target.pitch,"control_steps":self.control_steps,
+            "dt_s":self.last_dt,"error_local_rad":self.last_error.to_array(),
+            "feedback_local_rad_s":self.last_feedback.to_array(),
+            "feedforward_world_rad_s":self.feedforward.to_array(),
+            "feedforward_local_rad_s":self.last_feedforward.to_array()})
     }
 }
 
@@ -124,8 +175,10 @@ fn tracking_error(
 pub fn gimbal_pid_controls(
     time: Res<Time>,
     config: Res<SimulationConfig>,
-    gimbal: Option<
-        Single<
+    ids: Query<Entity, (With<Controlled>, With<InfantryGimbal>)>,
+    mut transforms: ParamSet<(
+        TransformHelper,
+        Query<
             (
                 &mut Transform,
                 &GlobalTransform,
@@ -138,31 +191,58 @@ pub fn gimbal_pid_controls(
                 Without<InfantryLaunchOffset>,
             ),
         >,
-    >,
-    muzzle: Option<Single<&GlobalTransform, (With<InfantryLaunchOffset>, With<Controlled>)>>,
+    )>,
+    muzzle: Option<Single<(Entity, &GlobalTransform), (With<InfantryLaunchOffset>, With<Controlled>)>>,
 ) {
-    let (Some(gimbal), Some(muzzle)) = (gimbal, muzzle) else {
-        return;
-    };
+    let (Ok(entity), Some(muzzle)) = (ids.single(), muzzle) else { return; };
+    let (muzzle_entity, muzzle_global) = muzzle.into_inner();
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
 
-    let (mut gimbal_transform, gimbal_global, mut gimbal_data, mut tracker) = gimbal.into_inner();
+    let fresh = if config.vehicle.gimbal_pid.fixed_update {
+        let helper = transforms.p0();
+        let (Ok(gimbal), Ok(muzzle)) = (helper.compute_global_transform(entity), helper.compute_global_transform(muzzle_entity)) else { return; };
+        Some((gimbal.rotation(), muzzle.rotation()))
+    } else { None };
+    let mut query = transforms.p1();
+    let Ok((mut gimbal_transform, gimbal_global, mut gimbal_data, mut tracker)) = query.get_mut(entity) else { return; };
+    // Fixed ticks must not use stale GlobalTransforms from the previous render.
+    let (gimbal_rotation, muzzle_rotation) = fresh.unwrap_or((gimbal_global.rotation(), muzzle_global.rotation()));
+    if config.vehicle.gimbal_pid.fixed_update && tracker.last_command_at.is_some_and(|t| t.elapsed().as_secs_f32() > 0.25) {
+        tracker.feedforward = Vec2::ZERO;
+        return;
+    }
 
     // Error is measured on the muzzle, so chassis motion shows up as tracking error
     // instead of being cancelled out by a one-shot correction.
     let error = tracking_error(
         tracker.target().rotation(),
         gimbal_transform.rotation,
-        gimbal_global.rotation(),
-        muzzle.rotation(),
+        gimbal_rotation,
+        muzzle_rotation,
     );
     let (yaw_error, pitch_error) = (error.x, error.y);
     let pid = &config.vehicle.gimbal_pid;
-    let yaw_rate = tracker.yaw.step(yaw_error, &pid.yaw, dt);
-    let pitch_rate = tracker.pitch.step(pitch_error, &pid.pitch, dt);
+    let yaw_feedback = tracker.yaw.step(yaw_error, &pid.yaw, dt);
+    let pitch_feedback = tracker.pitch.step(pitch_error, &pid.pitch, dt);
+    let mut feedforward = Vec2::ZERO;
+    if pid.feedforward_gain != 0.0 && tracker.last_command_at.is_some_and(|t| t.elapsed().as_secs_f32() <= pid.feedforward_reset_gap_s) {
+        let h = 0.001;
+        let next = GimbalAimTarget { yaw:tracker.target.yaw+tracker.feedforward.x*h,
+            pitch:tracker.target.pitch+tracker.feedforward.y*h };
+        let next_error = tracking_error(next.rotation(),gimbal_transform.rotation,gimbal_rotation,muzzle_rotation);
+        // Express the target's world angular velocity in the local actuator axes.
+        feedforward = Vec2::new(wrap_angle(next_error.x-error.x),wrap_angle(next_error.y-error.y)) / h * pid.feedforward_gain;
+    }
+    let yaw_rate = (yaw_feedback+feedforward.x).clamp(-pid.yaw.max_rate,pid.yaw.max_rate);
+    let pitch_rate = (pitch_feedback+feedforward.y).clamp(-pid.pitch.max_rate,pid.pitch.max_rate);
+    tracker.control_steps += 1;
+    tracker.last_dt = dt;
+    tracker.last_error = error;
+    tracker.last_feedback = Vec2::new(yaw_feedback,pitch_feedback);
+    tracker.last_feedforward = feedforward;
 
     (gimbal_data.local_yaw, gimbal_data.pitch, _) =
         gimbal_transform.rotation.to_euler(EulerRot::YXZ);
@@ -174,6 +254,25 @@ pub fn gimbal_pid_controls(
 
     gimbal_transform.rotation =
         Quat::from_euler(EulerRot::YXZ, gimbal_data.local_yaw, gimbal_data.pitch, 0.0);
+}
+
+#[cfg(feature = "bench")]
+pub fn publish_gimbal_control_trace(
+    time: Res<Time>,
+    config: Res<SimulationConfig>,
+    stamp: Res<crate::ros2::plugin::RosFrameStamp>,
+    publisher: Res<crate::ros2::topic::TopicPublisher<crate::ros2::topic::bench_topics::SimGimbalTraceTopic>>,
+    gimbal: Query<&GimbalAimTracker, (With<Controlled>, With<InfantryGimbal>)>,
+    mut previous: Local<f64>,
+) {
+    if time.elapsed_secs_f64()-*previous < 0.01 { return; }
+    *previous = time.elapsed_secs_f64();
+    let Ok(tracker) = gimbal.single() else { return; };
+    let mut value = tracker.diagnostic();
+    value["stamp_ns"] = serde_json::json!(i64::from(stamp.0.sec)*1_000_000_000+i64::from(stamp.0.nanosec));
+    value["fixed_update"] = serde_json::json!(config.vehicle.gimbal_pid.fixed_update);
+    value["feedforward_gain"] = serde_json::json!(config.vehicle.gimbal_pid.feedforward_gain);
+    publisher.publish(r2r::std_msgs::msg::String { data:value.to_string() });
 }
 
 #[cfg(test)]

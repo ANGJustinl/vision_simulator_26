@@ -308,11 +308,24 @@ impl Default for VehicleConfig {
 pub struct GimbalPidConfig {
     pub yaw: GimbalAxisPidConfig,
     pub pitch: GimbalAxisPidConfig,
+    /// Opt-in controller experiments; defaults preserve the render-frame loop.
+    pub fixed_update: bool,
+    pub feedforward_gain: f32,
+    pub feedforward_tau_s: f32,
+    pub feedforward_max_rate: f32,
+    pub feedforward_reset_gap_s: f32,
+    pub feedforward_max_step_rad: f32,
 }
 
 impl Default for GimbalPidConfig {
     fn default() -> Self {
         Self {
+            fixed_update: false,
+            feedforward_gain: 0.0,
+            feedforward_tau_s: 0.06,
+            feedforward_max_rate: 0.6,
+            feedforward_reset_gap_s: 0.15,
+            feedforward_max_step_rad: 0.06,
             yaw: GimbalAxisPidConfig {
                 kp: 12.0,
                 ki: 0.5,

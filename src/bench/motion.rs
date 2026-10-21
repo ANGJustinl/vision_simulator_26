@@ -114,6 +114,8 @@ pub enum Primitive {
     Line { v: f32, dir_deg: f32 },
     /// Mecanum sidestep at `v` along `dir_deg`, body heading unchanged.
     Strafe { v: f32, dir_deg: f32 },
+    /// World translation and independent chassis rotation through vehicle controls.
+    StrafeSpin { v: f32, dir_deg: f32, omega: f32 },
     /// Near-perpendicular crossing of the line of sight: the same slide as
     /// [`Primitive::Strafe`] (mecanum, body heading unchanged, so the armour
     /// ring does *not* swing with the travel direction and the crossing factor
@@ -204,6 +206,7 @@ impl Primitive {
             Self::Static => "static",
             Self::Line { .. } => "line",
             Self::Strafe { .. } => "strafe",
+            Self::StrafeSpin { .. } => "strafe_spin",
             Self::CrossLos { .. } => "cross_los",
             Self::Spin { .. } => "spin",
             // The sweep is authored as `type = "spin"` plus `yaw_amp_deg` and a
@@ -236,6 +239,10 @@ impl Primitive {
                     Self::Strafe { v, dir_deg },
                     clamped(self.v().unwrap_or(0.0), v),
                 )
+            }
+            Self::StrafeSpin { v, dir_deg, omega } => {
+                let new_v=clamp(v);let new_omega=omega.clamp(-max_omega,max_omega);
+                (Self::StrafeSpin {v:new_v,dir_deg,omega:new_omega},clamped(v,new_v)||clamped(omega,new_omega))
             }
             Self::Spin { omega } => {
                 let omega = omega.clamp(-max_omega, max_omega);
@@ -351,6 +358,7 @@ impl Primitive {
         match *self {
             Self::Line { v, .. }
             | Self::Strafe { v, .. }
+            | Self::StrafeSpin { v, .. }
             | Self::CrossLos { v, .. }
             | Self::Weave { v, .. }
             | Self::Sine { v, .. } => Some(v),
@@ -362,6 +370,7 @@ impl Primitive {
         match *self {
             Self::Line { dir_deg, .. }
             | Self::Strafe { dir_deg, .. }
+            | Self::StrafeSpin { dir_deg, .. }
             | Self::CrossLos { dir_deg, .. }
             | Self::Weave { dir_deg, .. }
             | Self::Sine { dir_deg, .. } => Some(dir_deg),
@@ -374,7 +383,7 @@ impl Primitive {
     /// (use [`Primitive::sweep_peak_omega`] for its peak).
     pub const fn omega(&self) -> Option<f32> {
         match *self {
-            Self::Spin { omega } => Some(omega),
+            Self::Spin { omega } | Self::StrafeSpin {omega,..} => Some(omega),
             _ => None,
         }
     }
@@ -436,7 +445,7 @@ impl Primitive {
     pub fn nominal_velocity(&self, t_local: f32) -> Vec3 {
         match *self {
             Self::Static => Vec3::ZERO,
-            Self::Line { v, dir_deg } | Self::Strafe { v, dir_deg } => {
+            Self::Line { v, dir_deg } | Self::Strafe { v, dir_deg } | Self::StrafeSpin {v,dir_deg,..} => {
                 MotionFrame::world_direction(dir_deg.to_radians()) * v
             }
             Self::CrossLos {
@@ -488,7 +497,7 @@ impl Primitive {
         let dt = to - from;
         match *self {
             Self::Static | Self::Spin { .. } | Self::SpinSweep { .. } => Vec3::ZERO,
-            Self::Line { v, dir_deg } | Self::Strafe { v, dir_deg } => {
+            Self::Line { v, dir_deg } | Self::Strafe { v, dir_deg } | Self::StrafeSpin {v,dir_deg,..} => {
                 MotionFrame::world_direction(dir_deg.to_radians()) * (v * dt)
             }
             Self::CrossLos {
@@ -551,7 +560,7 @@ impl Primitive {
         let max_speed = limits.max_speed.max(1e-3);
         match *self {
             Self::Static => MotionCommand::default(),
-            Self::Line { v, dir_deg } | Self::Strafe { v, dir_deg } => {
+            Self::Line { v, dir_deg } | Self::Strafe { v, dir_deg } | Self::StrafeSpin {v,dir_deg,..} => {
                 let heading = dir_deg.to_radians();
                 let direction = MotionFrame::world_direction(heading);
                 // Signed: `v = -2` is the same heading driven backwards, and the
@@ -562,6 +571,7 @@ impl Primitive {
                 // keeps the body still and slides (that is the mecanum case the
                 // primitive exists for).
                 let chassis = match *self {
+                    Self::StrafeSpin {omega,..} => (omega/limits.rotation_speed.abs().max(1e-3)).clamp(-1.0,1.0),
                     Self::Line { .. } => {
                         yaw_input_towards(chassis_yaw, heading, limits.rotation_speed)
                     }

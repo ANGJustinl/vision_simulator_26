@@ -215,9 +215,9 @@ impl GpuCaptureHandler for RosSnapshotCreator {
         }
 
         Some(Box::new(RosSnapshotSync {
-            stamp: RefCell::new(Clock::to_builtin_time(
-                &ctx.clock.lock().unwrap().get_now().unwrap(),
-            )),
+            // Extracted with this render world's transforms. Do not sample the
+            // clock here: GPU readback and JPEG publication happen much later.
+            stamp: RefCell::new(world.resource::<crate::ros2::plugin::RosFrameStamp>().0.clone()),
             want_camera_info,
             slot,
         }))

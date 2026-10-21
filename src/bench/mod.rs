@@ -32,11 +32,13 @@ use crate::config::SimulationConfig;
 use crate::ros2::plugin::capture_rune;
 
 pub mod events;
+pub mod continuous_fire;
 pub mod gt;
 pub mod motion;
 pub mod scenario;
 pub mod services;
 pub mod servo;
+pub mod strict_hits;
 
 /// `[bench] enabled`, read every frame so a hot-reloaded `config.toml` can still
 /// turn the benchmark off (or on) between runs.
@@ -69,6 +71,8 @@ impl Plugin for BenchPlugin {
             .add_observer(events::track_armor_contact_end);
 
         app.init_resource::<gt::ArmorIndex>()
+            .init_resource::<continuous_fire::ContinuousFire>()
+            .add_systems(PostUpdate, continuous_fire::fire.after(capture_rune).run_if(bench_enabled))
             .init_resource::<gt::ChassisYawTracker>()
             .init_resource::<servo::SpeedServoStates>()
             .insert_resource(gt::GtRobotsLimiter::new(config.bench.gt_robots_period()))
@@ -110,9 +114,7 @@ impl Plugin for BenchPlugin {
             // Plate slots/counts must exist before the first GT frame.
             .add_systems(
                 Update,
-                gt::build_armor_index
-                    .before(gt::publish_armor_gt)
-                    .run_if(bench_enabled),
+                gt::build_armor_index.run_if(bench_enabled),
             )
             // The scenario writes the scripted robots' inputs between the
             // keyboard routing and the vehicle system, so both drivers end up in
@@ -147,8 +149,9 @@ impl Plugin for BenchPlugin {
             // Ground truth reuses `/tf`'s stamp, so it must run after the system
             // that samples the clock and builds the TF tree.
             .add_systems(
-                Update,
+                PostUpdate,
                 (
+                    crate::systems::publish_gimbal_control_trace.after(capture_rune),
                     gt::publish_armor_gt.after(capture_rune),
                     gt::publish_robot_gt.after(capture_rune),
                     scenario::publish_scenario_status.after(capture_rune),
@@ -165,8 +168,11 @@ impl Plugin for BenchPlugin {
             // publish a contact point instead of a post-bounce position.
             .add_systems(
                 FixedPostUpdate,
-                events::record_shot_contacts.run_if(bench_enabled),
-            );
+                events::record_shot_contacts.run_if(bench_enabled).run_if(|| !strict_hits::enabled()),
+            )
+            .add_systems(avian3d::prelude::PhysicsSchedule,
+                strict_hits::contacts.in_set(avian3d::prelude::PhysicsStepSystems::Last)
+                    .run_if(bench_enabled).run_if(strict_hits::enabled));
 
         if config.bench.enabled {
             match config.bench.scenario_path() {

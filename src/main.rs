@@ -230,8 +230,8 @@ fn main() {
                     route_robot_inputs,
                     robot_vehicle_controls,
                     gimbal_controls,
-                    gimbal_pid_controls.run_if(|enabled: Res<SubscribeAutoAim>| {
-                        enabled.load(std::sync::atomic::Ordering::Acquire)
+                    gimbal_pid_controls.run_if(|enabled: Res<SubscribeAutoAim>, config: Res<SimulationConfig>| {
+                        enabled.load(std::sync::atomic::Ordering::Acquire) && !config.vehicle.gimbal_pid.fixed_update
                     }),
                     remote_gimbal_controls,
                 )
@@ -279,7 +279,11 @@ fn main() {
                 .run_if(controller_dart_just_pressed),
         )
         .add_systems(PostUpdate, uav_launch.after(TransformSystems::Propagate))
-        .add_systems(FixedUpdate, projectile_aerodynamics);
+        .add_systems(FixedUpdate, projectile_aerodynamics)
+        .add_systems(FixedUpdate, gimbal_pid_controls.run_if(
+            |enabled: Res<SubscribeAutoAim>, config: Res<SimulationConfig>| {
+                enabled.load(std::sync::atomic::Ordering::Acquire) && config.vehicle.gimbal_pid.fixed_update
+            }));
 
     // Always registered: the FPS overlay reads these diagnostics even when the
     // console logger (`debug.diagnostics`) is off.

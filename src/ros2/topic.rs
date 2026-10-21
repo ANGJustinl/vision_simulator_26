@@ -265,7 +265,7 @@ macro_rules! topic {
         )*
 
         pub fn register_sub(atomic:Arc<AtomicBool>, app:&mut App, node:&mut Node) {
-            $crate::subscriber!(atomic, app, node, $($topic,)*);
+            $crate::subscriber!(atomic.clone(), app, node, $($topic,)*);
         }
         topic!($($remaining)*);
     };
@@ -311,6 +311,7 @@ topic!(
         // stream, i.e. every pulse survives a frame; on overflow the oldest goes
         // first and `TopicSubscriber::dropped()` counts it.
         "/rm_gimbal/cmd" as GimbalCmd as GimbalCmdTopic queue 32 with QosProfile::sensor_data();
+        "/sim/aim/fire_eligibility" as RosString as FireEligibilityTopic queue 32 with QosProfile::sensor_data();
     }
 );
 
@@ -347,7 +348,15 @@ pub mod bench_topics {
                 with QosProfile::default().reliable().keep_last(32);
             "/sim/events/hit" as SimEvent as SimHitEventTopic queue 32
                 with QosProfile::default().reliable().keep_last(32);
+            "/sim/projectiles/trace" as r2r::std_msgs::msg::String as SimProjectileTraceTopic queue 32
+                with QosProfile::default().reliable().keep_last(32);
+            "/sim/gimbal/trace" as r2r::std_msgs::msg::String as SimGimbalTraceTopic queue 8
+                with QosProfile::sensor_data().best_effort().keep_last(8);
             "/sim/scenario/status" as SimScenarioStatus as SimScenarioStatusTopic queue 4
+                with QosProfile::sensor_data().best_effort().keep_last(4);
+        }
+        sub {
+            "/sim/bench/continuous_fire" as r2r::std_msgs::msg::String as SimContinuousFireTopic queue 4
                 with QosProfile::sensor_data().best_effort().keep_last(4);
         }
     );
