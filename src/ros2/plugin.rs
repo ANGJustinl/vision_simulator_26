@@ -67,7 +67,7 @@ pub struct RosFrameStamp(pub r2r::builtin_interfaces::msg::Time);
 #[derive(Resource)]
 struct GimbalCommandWatchdog {
     timeout: Option<Duration>,
-    last: Option<std::time::Instant>,
+    last: Option<crate::clock::Instant>,
     no_fire: bool,
 }
 
@@ -207,7 +207,10 @@ pub(crate) fn capture_rune(
 ) {
     // One clock read for the whole frame: `/tf`, the armour marker and the
     // benchmark ground truth all describe this same instant.
-    let stamp = Clock::to_builtin_time(&res_unwrap!(clock).get_now().unwrap());
+    let stamp = if crate::clock::enabled() {
+        let ns=crate::clock::now_ns();
+        r2r::builtin_interfaces::msg::Time {sec:(ns/1_000_000_000) as i32,nanosec:(ns%1_000_000_000) as u32}
+    } else { Clock::to_builtin_time(&res_unwrap!(clock).get_now().unwrap()) };
     frame_stamp.0 = stamp.clone();
 
     let cam_transform = camera.into_inner();
@@ -431,6 +434,17 @@ struct ScheduledGimbalShot(Option<i128>);
 #[derive(Resource, Default, Deref, DerefMut)]
 struct FireEligibility(crate::ros2::fire_eligibility::FireEligibility);
 
+#[derive(Resource,Default)]
+pub(crate) struct CoordinatedCommands(pub std::collections::VecDeque<r2r::rm_interfaces::msg::GimbalCmd>);
+
+#[cfg(feature="bench")]
+pub(crate) fn inject_lockstep_eligibility(world:&mut World,value:&serde_json::Value) {
+    let mut gate=world.resource_mut::<FireEligibility>();
+    gate.issued_ns=value["issued_ns"].as_i64().unwrap_or(0) as i128;
+    gate.command_stamp_ns=value["command_stamp_ns"].as_i64().unwrap_or(0) as i128;
+    gate.enabled=value["enabled"].as_bool().unwrap_or(false);
+}
+
 fn requires_fire_eligibility() -> bool {
     matches!(std::env::var("DAEDALUS_ALGORITHM_PROFILE").as_deref(),Ok("tracking_fire_v2")|Ok("tracking_fire_v3"))
 }
@@ -438,8 +452,7 @@ fn requires_fire_eligibility() -> bool {
 fn eligibility_allows(world: &World, stamp_ns: i128) -> bool {
     if !requires_fire_eligibility() { return true; }
     let gate=world.resource::<FireEligibility>();
-    let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default().as_nanos() as i128;
+    let now=crate::clock::now_ns();
     gate.allows(stamp_ns,now)
 }
 
@@ -466,7 +479,7 @@ fn process_subscription(
     eligibility_sub: Res<TopicSubscriber<FireEligibilityTopic>>,
     mut commands: Commands,
     mut watchdog: ResMut<GimbalCommandWatchdog>,
-    gimbal_cmd: ResMut<TopicSubscriber<GimbalCmdTopic>>,
+    mut gimbal_cmd: (ResMut<TopicSubscriber<GimbalCmdTopic>>, ResMut<CoordinatedCommands>),
     first_cmd: Res<FirstGimbalCmd>,
     mut fire_rate_limiter: ResMut<FireRateLimiter>,
     mut pending_fire: ResMut<PendingFire>,
@@ -485,7 +498,7 @@ fn process_subscription(
     let integration = std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|v| v == "1");
     let (gimbal_entity, mut tracker) = gimbal.into_inner();
     fire_rate_limiter.tick(time.delta());
-    if requires_fire_eligibility() {
+    if requires_fire_eligibility() && !crate::clock::enabled() {
         while let Some(message)=eligibility_sub.try_recv() {
             if let Ok(value)=serde_json::from_str::<serde_json::Value>(&message.data) {
                 let stamp=value["command_stamp_ns"].as_i64().unwrap_or(0) as i128;
@@ -507,7 +520,8 @@ fn process_subscription(
     // queue keeps a whole `fire_advice` pulse instead of replacing it with the
     // next message (see `TopicSubscriber`).
     loop {
-        let Some(cmd) = gimbal_cmd.try_recv() else {
+        let next=if crate::clock::enabled() {gimbal_cmd.1.0.pop_front()} else {gimbal_cmd.0.try_recv()};
+        let Some(cmd) = next else {
             break;
         };
         // No solution from the solver: drop the target so the PID loop stops driving.
@@ -516,8 +530,7 @@ fn process_subscription(
         let stale = watchdog.timeout.is_some_and(|timeout| {
             let command_ns = i128::from(cmd.header.stamp.sec) * 1_000_000_000
                 + i128::from(cmd.header.stamp.nanosec);
-            let now_ns = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as i128;
+            let now_ns = crate::clock::now_ns();
             now_ns - command_ns > timeout.as_nanos() as i128 || command_ns > now_ns + 10_000_000
         });
         if cmd.distance == -1.0 || stale || !cmd.yaw.is_finite()
@@ -527,7 +540,7 @@ fn process_subscription(
             if integration { pending_fire.reset(); }
             break;
         }
-        watchdog.last = Some(std::time::Instant::now());
+        watchdog.last = Some(crate::clock::Instant::now());
         first_cmd.mark();
         if cmd.fire_advice && !watchdog.no_fire && !pending_fire.requested {
             pending_fire.requested = true;
@@ -539,12 +552,16 @@ fn process_subscription(
 
         let target = GimbalAimTarget::from_solver_degrees(cmd.yaw as f32, cmd.pitch as f32);
         match tracker.as_mut() {
-            Some(tracker) => tracker.retarget_stamped(target,
-                i128::from(cmd.header.stamp.sec)*1_000_000_000+i128::from(cmd.header.stamp.nanosec),&config.vehicle.gimbal_pid),
+            Some(tracker) => {
+                tracker.retarget_stamped(target,
+                    i128::from(cmd.header.stamp.sec)*1_000_000_000+i128::from(cmd.header.stamp.nanosec),&config.vehicle.gimbal_pid);
+                tracker.temporal_setpoint(cmd.temporal_valid,cmd.aim_stamp_ns,cmd.yaw_rate_radps,cmd.pitch_rate_radps);
+            },
             None => {
                 let mut tracker = GimbalAimTracker::new(target);
                 tracker.retarget_stamped(target,
                     i128::from(cmd.header.stamp.sec)*1_000_000_000+i128::from(cmd.header.stamp.nanosec),&config.vehicle.gimbal_pid);
+                tracker.temporal_setpoint(cmd.temporal_valid,cmd.aim_stamp_ns,cmd.yaw_rate_radps,cmd.pitch_rate_radps);
                 commands
                     .entity(gimbal_entity)
                     .insert(tracker);
@@ -560,8 +577,7 @@ fn process_subscription(
     // the cooldown here and its own per-frame call keeps its cadence — and the
     // limiter below stays the binding gate, so the <=10 Hz contract is unchanged.
     if integration && pending_fire.requested {
-        let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().as_nanos() as i128;
+        let now_ns = crate::clock::now_ns();
         if now_ns - pending_fire.stamp_ns > 250_000_000 || watchdog.last.is_none() {
             pending_fire.reset();
         }
@@ -749,6 +765,10 @@ impl Plugin for ROS2Plugin {
         let points_per_publish =
             ((sim_config.livox_ros.points_per_second as f32) / publish_freq).max(1.0) as usize;
 
+        #[cfg(feature="bench")]
+        let sensor_publisher=app.world().resource::<TopicPublisher<crate::ros2::topic::bench_topics::SimSensorStateTopic>>().clone();
+        #[cfg(feature="bench")]
+        let sensor_sequence=app.world().resource::<crate::capture::sensor::SensorSequence>().clone();
         app.insert_resource(RoboMasterClock(clock.clone()))
             .insert_resource(RosFrameStamp(r2r::builtin_interfaces::msg::Time {
                 sec: 0,
@@ -769,11 +789,16 @@ impl Plugin for ROS2Plugin {
             .init_resource::<PendingFire>()
             .init_resource::<ScheduledGimbalShot>()
             .init_resource::<FireEligibility>()
+            .init_resource::<CoordinatedCommands>()
             .init_resource::<crate::systems::IntegrationShotPermit>()
             .insert_resource(TechCoreStateRateLimiter(AverageRateLimiter::from_hz(20.0)))
             .add_plugins(RosCapturePlugin {
                 config: color_capture_config,
                 context: RosCaptureContext {
+                    #[cfg(feature="bench")]
+                    sensor: sensor_publisher,
+                    #[cfg(feature="bench")]
+                    sensor_sequence,
                     clock: clock.clone(),
                     fov_y,
                     publish_compressed: color_stream.publish_compressed,

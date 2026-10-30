@@ -12,7 +12,7 @@ use bevy::{
         render_resource::{
             Buffer, BufferAsyncError, BufferDescriptor, BufferUsages, Extent3d, MapMode, Origin3d,
             TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect,
-            TextureFormat, TextureUsages,
+            TextureFormat, TextureUsages, PollType,
         },
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems},
     },
@@ -796,7 +796,17 @@ fn receive_image_from_buffer(mut world: DeferredWorld) {
             .is_ok();
         debug_assert!(sent, "capture worker thread is gone");
     }
+    // Window presentation normally advances native map callbacks. Without a
+    // surface, explicitly poll without waiting so asynchronous readback keeps
+    // its existing bounded queues and never stalls the simulation thread.
+    if world.contains_resource::<HeadlessReadback>() {
+        let poll=if crate::clock::enabled() {PollType::wait_indefinitely()} else {PollType::Poll};
+        let _ = world.resource::<RenderDevice>().poll(poll);
+    }
 }
+
+#[derive(Resource)]
+struct HeadlessReadback;
 
 pub struct CameraCapturePlugin {
     config: CaptureConfig,
@@ -868,7 +878,12 @@ impl Plugin for CameraCapturePlugin {
             app.insert_resource(self.config.clone());
         }
 
+        let headless = app.world().get_resource::<crate::config::SimulationConfig>()
+            .is_some_and(|config| config.window.headless);
         let render_app = app.sub_app_mut(RenderApp);
+        if headless {
+            render_app.insert_resource(HeadlessReadback);
+        }
         render_app.world_mut().init_resource::<ImageCopiers>();
         render_app
             .world_mut()

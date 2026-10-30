@@ -1664,6 +1664,7 @@ pub fn scenario_control(
         &GlobalTransform,
     ), Without<Infantry>>,
     children: Query<&Children>,
+    mut trackers: Query<&mut crate::systems::GimbalAimTracker>,
 ) {
     let Some(scenario) = scenario.as_mut() else {
         return;
@@ -1686,6 +1687,9 @@ pub fn scenario_control(
     // so a restart rebuilds the spawn and the scripted driver from a clean slate.
     let command = std::mem::take(&mut scenario.pending);
     if command != ScenarioCommand::None {
+        if config.vehicle.gimbal_pid.dynamics == "rm2017-yaw-unitdc" {
+            for mut tracker in &mut trackers {tracker.reset_yaw_model();}
+        }
         apply_runtime_command(
             scenario,
             command,
@@ -1987,7 +1991,7 @@ pub fn publish_scenario_status(
         return;
     };
     let fixed_now = time_fixed.elapsed_secs_f64();
-    if fixed_now - scenario.status_last_secs < 1.0 / STATUS_HZ {
+    if !crate::clock::observing() && fixed_now - scenario.status_last_secs < 1.0 / STATUS_HZ {
         return;
     }
     scenario.status_last_secs = fixed_now;

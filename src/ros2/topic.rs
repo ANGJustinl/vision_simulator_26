@@ -350,12 +350,20 @@ pub mod bench_topics {
                 with QosProfile::default().reliable().keep_last(32);
             "/sim/projectiles/trace" as r2r::std_msgs::msg::String as SimProjectileTraceTopic queue 32
                 with QosProfile::default().reliable().keep_last(32);
+            "/sim/projectiles/settlement" as r2r::std_msgs::msg::String as SimSettlementTopic queue 32
+                with QosProfile::default().reliable().keep_last(32);
             "/sim/gimbal/trace" as r2r::std_msgs::msg::String as SimGimbalTraceTopic queue 8
                 with QosProfile::sensor_data().best_effort().keep_last(8);
             "/sim/scenario/status" as SimScenarioStatus as SimScenarioStatusTopic queue 4
                 with QosProfile::sensor_data().best_effort().keep_last(4);
+            "/sim/scenario/boundary" as r2r::std_msgs::msg::String as SimScenarioBoundaryTopic queue 32
+                with QosProfile::default().reliable().keep_last(32);
+            "/sim/camera/sensor" as r2r::std_msgs::msg::String as SimSensorStateTopic queue 64
+                with QosProfile::default().reliable().keep_last(64);
         }
         sub {
+            "/sim/camera/sensor_control" as r2r::std_msgs::msg::String as SimSensorControlTopic queue 4
+                with QosProfile::default().reliable().keep_last(4);
             "/sim/bench/continuous_fire" as r2r::std_msgs::msg::String as SimContinuousFireTopic queue 4
                 with QosProfile::sensor_data().best_effort().keep_last(4);
         }

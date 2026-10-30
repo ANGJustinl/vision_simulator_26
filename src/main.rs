@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 mod capture;
+mod clock;
 mod components;
 mod config;
 mod handler;
@@ -23,8 +24,9 @@ use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::render::settings::{InstanceFlags, RenderCreation, WgpuSettings, WgpuSettingsPriority};
 use bevy::render::{RenderPlugin, RenderSystems};
-use bevy::window::PresentMode;
-use bevy::winit::WinitSettings;
+use bevy::app::ScheduleRunnerPlugin;
+use bevy::window::{ExitCondition, PresentMode};
+use bevy::winit::{WinitPlugin, WinitSettings};
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use std::sync::atomic::AtomicBool;
@@ -148,6 +150,20 @@ fn main() {
         PresentMode::AutoNoVsync
     });
     let mut app = App::new();
+    let headless = config.window.headless;
+    if headless {
+        app.add_plugins(DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            })
+            .set(render_plugin_for_platform())
+            .disable::<WinitPlugin>());
+        // Frame pacing remains owned by PerformancePlugin, exactly as in GUI mode.
+        app.add_plugins(ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO));
+        app.add_plugins(PhysicsPlugins::default());
+    } else {
     app.add_plugins((
         DefaultPlugins
             .set(WindowPlugin {
@@ -162,8 +178,9 @@ fn main() {
         PhysicsPlugins::default(),
     ));
     app.insert_resource(WinitSettings::continuous());
+    }
 
-    if config.debug.egui {
+    if config.debug.egui && !headless {
         app.add_plugins(EguiPlugin::default());
         if config.debug.inspector {
             app.add_plugins(WorldInspectorPlugin::new());
@@ -173,9 +190,6 @@ fn main() {
     app.add_plugins(RoboMasterPlugins)
         .add_plugins(MetalFxPlugin)
         .add_plugins(CameraLensEffectPlugin)
-        .add_plugins(HelpPlugin)
-        .add_plugins(FpsDisplayPlugin)
-        .add_plugins(NoticePlugin)
         .add_plugins(crate::scene::ScenePlugin)
         .add_plugins(ConfigPlugin)
         .add_plugins(PerformancePlugin)
@@ -196,7 +210,7 @@ fn main() {
             config.projectile.cooldown,
             TimerMode::Once,
         )))
-        .add_systems(Startup, (setup, setup_projectile, setup_picture_in_picture))
+        .add_systems(Startup, (setup, setup_projectile, setup_picture_in_picture.run_if(move || !headless)))
         .add_observer(on_hit)
         .add_observer(on_activate)
         .configure_sets(
@@ -215,8 +229,8 @@ fn main() {
                 // Input phase
                 (
                     clear_controller_input,
-                    sample_keyboard_controller,
-                    sample_gamepad_controller,
+                    sample_keyboard_controller.run_if(move || !headless),
+                    sample_gamepad_controller.run_if(move || !headless),
                     update_auto_aim_subscription,
                     following_controls,
                     focus_controls,
@@ -288,6 +302,9 @@ fn main() {
     // Always registered: the FPS overlay reads these diagnostics even when the
     // console logger (`debug.diagnostics`) is off.
     app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+    if !headless {
+        app.add_plugins((HelpPlugin, FpsDisplayPlugin, NoticePlugin));
+    }
 
     if config.debug.diagnostics {
         app.add_plugins(LogDiagnosticsPlugin::default());

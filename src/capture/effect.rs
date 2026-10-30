@@ -182,6 +182,11 @@ pub struct CameraLensEffectPlugin;
 
 impl Plugin for CameraLensEffectPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<crate::capture::sensor::SensorSequence>()
+            .init_resource::<crate::capture::sensor::SensorFrame>()
+            .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<crate::capture::sensor::SensorFrame>::default());
+        #[cfg(all(feature="ros2",feature="bench"))]
+        app.add_systems(Update,crate::capture::sensor::poll_control.before(sync_camera_lens_effect));
         app.add_plugins(FullscreenMaterialPlugin::<CameraLensEffect>::default())
             .init_resource::<LensPreview>()
             .add_systems(
@@ -255,12 +260,18 @@ fn sync_camera_lens_effect(
     mut commands: Commands,
     capture: Query<Entity, With<CaptureCamera>>,
     mut effect: Query<&mut CameraLensEffect>,
+    sequence: Res<crate::capture::sensor::SensorSequence>,
+    mut sensor_frame: ResMut<crate::capture::sensor::SensorFrame>,
 ) {
     let Ok(camera) = capture.single() else {
         return;
     };
 
-    let seed = (time.elapsed_secs_f64() * 1000.0).rem_euclid(4096.0) as f32;
+    let elapsed=if crate::clock::enabled() {crate::clock::sensor_seconds()} else {time.elapsed_secs_f64()};
+    let seed = if let Some(seed)=config.capture.effect.sensor_seed {
+        if sequence.current().seed!=Some(seed) {sequence.reset("configured".into(),seed);}
+        *sensor_frame=sequence.current();sensor_frame.phase
+    } else {*sensor_frame=Default::default();(elapsed * 1000.0).rem_euclid(4096.0) as f32};
     let Some(next) = CameraLensEffect::from_config(&config.capture.effect, seed) else {
         // Switched off: the component has to disappear, not go to zero, or the
         // pass would keep running for nothing.

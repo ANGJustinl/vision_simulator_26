@@ -200,11 +200,16 @@ impl GpuCaptureHandler for RosSnapshotCreator {
         // The intrinsics are constant while the resolution is, and the detector
         // latches the first message it receives; repeating them per frame is
         // pure traffic.
-        let want_camera_info = gates.camera_info.lock().unwrap().allow();
+        #[cfg(feature="bench")]
+        let logical_due=world.get_resource::<crate::bench::lockstep::StepFrame>().is_some_and(|f|f.capture);
+        #[cfg(not(feature="bench"))]
+        let logical_due=false;
+        let want_camera_info = if crate::clock::enabled() {logical_due} else {gates.camera_info.lock().unwrap().allow()};
 
         // Both gates must open: the rate cap decides *how often* a frame is
         // worth reading back, the slot bound decides whether we may start one now.
-        let slot = if ctx.wants_image() && gates.image.lock().unwrap().allow() {
+        let due=if crate::clock::enabled() {logical_due} else {gates.image.lock().unwrap().allow()};
+        let slot = if ctx.wants_image() && due {
             gates.try_acquire()
         } else {
             None
@@ -212,6 +217,17 @@ impl GpuCaptureHandler for RosSnapshotCreator {
 
         if slot.is_none() && !want_camera_info {
             return None;
+        }
+
+        #[cfg(feature="bench")]
+        if slot.is_some() {
+            if let Some(sensor)=world.get_resource::<crate::capture::sensor::SensorFrame>().filter(|s|s.seed.is_some()) {
+                let stamp=&world.resource::<crate::ros2::plugin::RosFrameStamp>().0;
+                ctx.sensor.publish(r2r::std_msgs::msg::String{data:serde_json::json!({"version":1,"kind":"frame",
+                    "stamp_ns":stamp.sec as i64*1_000_000_000+stamp.nanosec as i64,
+                    "reset_id":sensor.reset_id,"seed":sensor.seed,"index":sensor.index,"phase":sensor.phase}).to_string()});
+                ctx.sensor_sequence.captured(sensor);
+            }
         }
 
         Some(Box::new(RosSnapshotSync {
@@ -382,6 +398,10 @@ fn publish_loop(results: Receiver<EncodedFrame>, publish: impl Fn(EncodedFrame))
 
 #[derive(Resource, Clone)]
 pub struct RosCaptureContext {
+    #[cfg(feature="bench")]
+    pub sensor: TopicPublisher<crate::ros2::topic::bench_topics::SimSensorStateTopic>,
+    #[cfg(feature="bench")]
+    pub sensor_sequence: crate::capture::sensor::SensorSequence,
     pub clock: Arc<Mutex<Clock>>,
     pub fov_y: f32,
     pub publish_raw: bool,

@@ -49,6 +49,7 @@ impl AverageRateLimiter {
 pub struct WallRateLimiter {
     period: Option<Duration>,
     last: Option<Instant>,
+    logical_last: Option<i128>,
 }
 
 impl WallRateLimiter {
@@ -56,6 +57,7 @@ impl WallRateLimiter {
         Self {
             period: period.filter(|p| !p.is_zero()),
             last: None,
+            logical_last: None,
         }
     }
 
@@ -68,6 +70,12 @@ impl WallRateLimiter {
     /// may — otherwise a 1 Hz `/camera_info` gate would delay startup by a
     /// second, and the detector needs the intrinsics before its first solve.
     pub fn allow(&mut self) -> bool {
+        if crate::clock::enabled() {
+            let now=crate::clock::now_ns();
+            let due=self.period.is_none_or(|period|self.logical_last.is_none_or(|last|now-last>=period.as_nanos() as i128));
+            if due {self.logical_last=Some(now);}
+            return due;
+        }
         self.allow_at(Instant::now())
     }
 

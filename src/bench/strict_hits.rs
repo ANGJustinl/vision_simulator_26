@@ -9,7 +9,8 @@ use crate::components::{DartProjectile, RobotId, GameLayer};
 use crate::robomaster::prelude::{Armor, ArmorRoot, Projectile};
 use crate::ros2::{plugin::RosFrameStamp, topic::{TopicPublisher, bench_topics::{SimHitEventTopic, SimProjectileTraceTopic}}};
 use crate::statistic::ProjectileStatistics;
-use crate::util::gt::to_ros_vec3;
+use crate::util::gt::{to_ros_vec3, plate_size};
+use crate::util::entity_query::HierarchyQuery;
 
 pub fn enabled() -> bool {
     std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|v| v == "1")
@@ -56,8 +57,7 @@ fn refine_contact(shape: &Collider, position: Vec3, rotation: Quat,
 pub fn contacts(
     spatial: SpatialQuery,
     mut commands: Commands,
-    time: Res<Time>,
-    fixed: Res<Time<Fixed>>,
+    clocks: (Res<Time>, Res<Time<Fixed>>),
     scenario: Option<Res<Scenario>>,
     stamp: Res<RosFrameStamp>,
     hit_pub: Res<TopicPublisher<SimHitEventTopic>>,
@@ -66,11 +66,16 @@ pub fn contacts(
         (With<Projectile>, Without<DartProjectile>, Without<ShotResolved>)>,
     colliders: Query<(Entity,&Position,&Rotation,&Collider,&CollisionLayers,Option<&Armor>)>,
     roots: Query<&ArmorRoot>,
+    geometry: (Query<&GlobalTransform>, HierarchyQuery),
     robot_ids: Query<&RobotId>,
     parents: Query<&ChildOf>,
     mut stats: ResMut<ProjectileStatistics>,
     mut previous_plates: Local<std::collections::HashMap<Entity,Vec3>>,
+    settling: (Res<events::ShotSequence>, ResMut<crate::bench::settlement::Settlement>),
 ) {
+    let (time,fixed)=clocks;
+    let (sequence,mut settlement)=settling;
+    let (globals,hierarchy) = geometry;
     let layers = GameLayer::projectile_collision_layers(true);
     let filter = SpatialQueryFilter::default();
     let mut points = Vec::new();
@@ -134,14 +139,41 @@ pub fn contacts(
             - f64::from((1.0-fraction)*fixed.delta_secs())).max(0.0) as f32;
         if armor {
             let (Some(root),Some(target)) = (root,target) else { continue; };
-            hit_pub.publish(events::hit_armor_event(&stamp,sim_ns,shot.shot_seq,
+            let mut event = events::hit_armor_event(&stamp,sim_ns,shot.shot_seq,
                 shot.shooter_id,target,root.id.as_usize() as u32,
-                to_ros_vec3(centre),Some(to_ros_vec3(contact)),to_ros_vec3(velocity.0),elapsed));
+                to_ros_vec3(centre),Some(to_ros_vec3(contact)),to_ros_vec3(velocity.0),elapsed);
+            // Read the model centre in collider-local coordinates, then use the
+            // SAME physics pose and translation fraction as the accepted sweep.
+            if let Ok((_,position,rotation,_,_,Some(armor_data))) = colliders.get(other) {
+                let model_root = chain.iter().copied().find(|entity| roots.get(*entity).is_ok());
+                if let (Some(root_entity), Ok(global)) = (model_root, globals.get(other)) {
+                    let model_center = hierarchy.of(root_entity).suffix("CENTER").any().one().unwrap_or(root_entity);
+                    if let (Ok(center_global), Ok(root_global)) = (globals.get(model_center), globals.get(root_entity)) {
+                        let offset = global.affine().inverse().transform_point3(center_global.translation());
+                        let scale = global.compute_transform().scale;
+                        let movement = position.0-previous_plates.get(&other).copied().unwrap_or(position.0);
+                        let plate_center = position.0+rotation.0*(offset*scale)-movement*(1.0-fraction);
+                        // Model -Y is the normal, +X width, +Z height.
+                        let pose_delta = rotation.0*global.rotation().inverse();
+                        let right = to_ros_vec3(pose_delta*root_global.rotation()*Vec3::X).normalize();
+                        let up = to_ros_vec3(pose_delta*root_global.rotation()*Vec3::Z).normalize();
+                        let size = plate_size(armor_data.spec.armor_type());
+                        event.impact_geometry_valid = true;
+                        event.impact_sim_time_ns = sim_ns.saturating_sub(((1.0-fraction)*fixed.delta_secs()*1e9) as u64);
+                        event.plate_center = to_ros_vec3(plate_center).to_array().map(f64::from).to_vec();
+                        event.plate_right = right.to_array().map(f64::from).to_vec();
+                        event.plate_up = up.to_array().map(f64::from).to_vec();
+                        event.plate_size = vec![size.0,size.1];
+                    }
+                }
+            }
+            hit_pub.publish(event);
             stats.increase_accurate();
         } else {
             hit_pub.publish(events::hit_env_event(&stamp,sim_ns,shot.shot_seq,
                 shot.shooter_id,to_ros_vec3(centre),to_ros_vec3(velocity.0),elapsed));
         }
+        settlement.finish(&sequence,shot.shot_seq,"collision");
         commands.entity(projectile).insert(ShotResolved).despawn();
     }
     previous_plates.clear();

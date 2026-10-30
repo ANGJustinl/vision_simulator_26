@@ -32,3 +32,13 @@ float32[3] velocity         # fire: muzzle velocity; hit: impact velocity
 float32 flight_time_s       # filled in for kind=1/2; app-clock difference
                             # between the fire and the resolve (the event itself
                             # carries `sim_time_ns` for the scenario clock)
+
+# Additive impact geometry v1; only valid for strict integration armor hits.
+# This is the same end-step orientation / substep translation as the sweep,
+# NOT an independently interpolated render-frame pose. All vectors use map.
+bool impact_geometry_valid
+uint64 impact_sim_time_ns
+float64[3] plate_center
+float64[3] plate_right
+float64[3] plate_up
+float32[2] plate_size

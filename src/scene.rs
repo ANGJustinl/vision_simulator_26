@@ -15,6 +15,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::{InstanceId, WorldAssetRoot, WorldInstance};
 use std::collections::HashMap;
 
+use crate::config::{SimulationConfig, Terrain};
 use crate::components::{
     ActiveSlapper, Controlled, GameLayer, GroundRoot, Infantry, PreciousCollision, RobotId,
     SlapperInfantry,
@@ -101,6 +102,24 @@ async fn load_scene(w: AsyncWorld) {
         )
     };
 
+    let flat = w.with_world(|world| {
+        world.resource::<SimulationConfig>().scene.terrain == Terrain::FlatRange
+    }).await;
+    if flat {
+        // An explicit collider exists before any dynamic vehicle is loaded.
+        w.with_world(|world| {
+            let mesh = world.resource_mut::<Assets<Mesh>>().add(Cuboid::new(120.0, 0.2, 120.0));
+            let material = world.resource_mut::<Assets<StandardMaterial>>().add(StandardMaterial {
+                base_color: Color::srgb(0.32, 0.32, 0.32),
+                perceptual_roughness: 1.0, ..default()
+            });
+            world.spawn((Name::new("FlatRangeGround"), GroundRoot,
+                Mesh3d(mesh), MeshMaterial3d(material),
+                Transform::from_xyz(0.0, -0.1, 0.0),
+                RigidBody::Static, Collider::cuboid(120.0, 0.2, 120.0),
+                GameLayer::environment_collision_layers(), Friction::new(0.5)));
+        }).await;
+    } else {
     // Environment first. Every robot below lands on what these build.
     let ground = w
         .spawn(scene("GROUND.glb"), (GroundRoot, Friction::new(0.5)))
@@ -175,6 +194,8 @@ async fn load_scene(w: AsyncWorld) {
     .await;
     colliders_ready(&w, power_rune).await;
 
+    }
+
     // Robots last, so they can never become dynamic over an empty world.
     //
     // Player start pose, tuned for the ROS 2 auto-aim loop: from here two enemy
@@ -192,12 +213,12 @@ async fn load_scene(w: AsyncWorld) {
         .spawn(
             scene("vehicle.glb"),
             (
-                Transform::from_xyz(0.1433, 0.4199, 3.1117).with_rotation(Quat::from_xyzw(
+                if flat { Transform::from_xyz(0.0, 1.0, 0.0) } else { Transform::from_xyz(0.1433, 0.4199, 3.1117).with_rotation(Quat::from_xyzw(
                     -0.26040781,
                     -0.21265314,
                     -0.05930884,
                     0.93991959,
-                )),
+                )) },
                 Infantry::new(Team::Red, INFANTRY_THREE_CONFIG),
                 Controlled,
                 RobotId(0),
@@ -210,7 +231,7 @@ async fn load_scene(w: AsyncWorld) {
         .spawn(
             scene("vehicle.glb"),
             (
-                Transform::from_xyz(1.0, 1.0, 1.0),
+                if flat { Transform::from_xyz(0.0, 1.0, -5.0) } else { Transform::from_xyz(1.0, 1.0, 1.0) },
                 Infantry::new(Team::Blue, INFANTRY_THREE_CONFIG),
                 SlapperInfantry,
                 RobotId(1),
@@ -219,6 +240,7 @@ async fn load_scene(w: AsyncWorld) {
         .await;
     w.run(setup_vehicle, slapper).await;
 
+    if !flat {
     let hero = w
         .spawn(
             scene("HERO.glb"),
@@ -232,6 +254,7 @@ async fn load_scene(w: AsyncWorld) {
         )
         .await;
     w.run(setup_vehicle, hero).await;
+    }
 
     info!("scene loaded");
 }

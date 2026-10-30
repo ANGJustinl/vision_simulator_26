@@ -175,7 +175,7 @@ pub fn publish_robot_gt(
     gimbals: Query<(&GlobalTransform, &InfantryGimbal)>,
     children: Query<&Children>,
 ) {
-    if !limiter.0.allow() {
+    if !crate::clock::observing() && !limiter.0.allow() {
         return;
     }
 

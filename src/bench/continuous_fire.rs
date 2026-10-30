@@ -25,8 +25,7 @@ pub fn fire(world: &mut World) {
         state.enabled = parsed.as_ref().and_then(|v| v["enabled"].as_bool()).unwrap_or(false);
         state.stamp_ns = parsed.as_ref().and_then(|v| v["stamp_ns"].as_i64()).unwrap_or(0) as i128;
     }
-    let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default().as_nanos() as i128;
+    let now_ns = crate::clock::now_ns();
     let state = world.resource::<ContinuousFire>();
     if !state.enabled || now_ns-state.stamp_ns > 250_000_000 || state.stamp_ns > now_ns+10_000_000
         || !world.get_resource::<super::scenario::Scenario>()

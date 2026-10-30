@@ -37,7 +37,7 @@ use bevy::prelude::*;
 use r2r::rm_interfaces::msg::SimEvent;
 use r2r::std_msgs::msg::Header;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::bench::scenario::Scenario;
@@ -70,7 +70,7 @@ const MAP_FRAME: &str = "map";
 /// Global rather than per-shooter: P0 has exactly one shooter, and a single
 /// counter cannot be misread as "shot N of robot 0" by a consumer.
 #[derive(Resource, Default)]
-pub struct ShotSequence(AtomicU32);
+pub struct ShotSequence(AtomicU32, AtomicU64);
 
 impl ShotSequence {
     /// Allocate the next shot id. Starts at 1 so `0` can mean "unset" on the
@@ -83,6 +83,10 @@ impl ShotSequence {
         self.0.load(Ordering::Relaxed)
     }
 
+    pub fn generation(&self) -> u64 {
+        self.1.load(Ordering::Relaxed)
+    }
+
     /// P1-B: restart the numbering at 1 (the next [`Self::next`] returns 1).
     ///
     /// Only meaningful together with a scenario reset, which also despawns the
@@ -91,6 +95,7 @@ impl ShotSequence {
     /// fresh `shot_seq`.
     pub fn reset(&self) {
         self.0.store(0, Ordering::Relaxed);
+        self.1.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -338,6 +343,7 @@ pub fn fire_event(
         contact_point: no_contact_point(),
         velocity: ros_vec3(velocity),
         flight_time_s: 0.0,
+        ..Default::default()
     }
 }
 
@@ -386,6 +392,7 @@ pub fn hit_armor_event(
             .unwrap_or_else(no_contact_point),
         velocity: ros_vec3(velocity),
         flight_time_s,
+        ..Default::default()
     }
 }
 
@@ -412,6 +419,7 @@ pub fn hit_env_event(
         contact_point: no_contact_point(),
         velocity: ros_vec3(velocity),
         flight_time_s,
+        ..Default::default()
     }
 }
 

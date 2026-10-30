@@ -18,7 +18,7 @@ use crate::systems::{ControllerState, request_controller_rumble};
 pub(crate) struct IntegrationShotPermit {
     pub authorized: bool,
     pub stamp_ns: i128,
-    pub last_launch: Option<std::time::Instant>,
+    pub last_launch: Option<crate::clock::Instant>,
 }
 
 pub fn setup_projectile(
@@ -69,8 +69,7 @@ pub fn projectile_launch(
     if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|value| value == "1") {
         let Some(mut permit) = permit else { return; };
         let authorized = std::mem::take(&mut permit.authorized);
-        let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default().as_nanos() as i128;
+        let now_ns = crate::clock::now_ns();
         let rate = std::env::var("DAEDALUS_INTEGRATION_FIRE_RATE_HZ").ok()
             .and_then(|value| value.parse::<f64>().ok()).unwrap_or(2.0);
         if !rate.is_finite() || rate <= 0.0 || rate > 5.0 { return; }
@@ -85,7 +84,7 @@ pub fn projectile_launch(
         }
         // The ROS path already advances the mechanical cooldown each frame.
         if !cooldown.is_finished() { return; }
-        permit.last_launch = Some(std::time::Instant::now());
+        permit.last_launch = Some(crate::clock::Instant::now());
     }
     cooldown.tick(time.delta());
     if !cooldown.is_finished() {
@@ -246,10 +245,19 @@ pub fn cleanup_projectiles(
     time: Res<Time>,
     mut commands: Commands,
     mut projectiles: Query<(Entity, &mut ProjectileLifetime)>,
+    #[cfg(feature = "bench")] tags: Query<&crate::bench::events::ShotTag>,
+    #[cfg(feature = "bench")] sequence: Res<crate::bench::events::ShotSequence>,
+    #[cfg(feature = "bench")] mut settlement: ResMut<crate::bench::settlement::Settlement>,
 ) {
     for (entity, mut lifetime) in &mut projectiles {
         lifetime.tick(time.delta());
         if lifetime.is_finished() {
+            #[cfg(feature = "bench")]
+            if crate::bench::strict_hits::enabled() {
+                if let Ok(tag)=tags.get(entity) {
+                    settlement.finish(&sequence,tag.shot_seq,"expired");
+                }
+            }
             commands.entity(entity).despawn();
         }
     }
