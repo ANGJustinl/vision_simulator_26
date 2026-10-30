@@ -1687,7 +1687,7 @@ pub fn scenario_control(
     // so a restart rebuilds the spawn and the scripted driver from a clean slate.
     let command = std::mem::take(&mut scenario.pending);
     if command != ScenarioCommand::None {
-        if config.vehicle.gimbal_pid.dynamics == "rm2017-yaw-unitdc" {
+        if crate::systems::yaw_reference::ReferenceModel::from_id(&config.vehicle.gimbal_pid.dynamics).is_some() {
             for mut tracker in &mut trackers {tracker.reset_yaw_model();}
         }
         apply_runtime_command(

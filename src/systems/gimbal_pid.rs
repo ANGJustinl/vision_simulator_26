@@ -114,6 +114,22 @@ impl GimbalAimTracker {
         self.model_limited=false;self.model_effective_ns=None;
     }
 
+    /// Shared production yaw actuator path, also exercised by the component harness.
+    fn advance_yaw(&mut self,id:&str,rate:f32,dt:f32,limit:f32,angle_before:f32)->f32 {
+        match id {
+        "legacy" => rate * dt,
+        id => {
+            let model=super::yaw_reference::ReferenceModel::from_id(id)
+                .unwrap_or_else(||panic!("Unknown gimbal dynamics: {}",id));
+            let a=model.advance(&mut self.yaw_model,rate as f64,dt as f64,limit as f64);
+            self.model_diagnostic=[rate as f64,a.raw_rate,a.rate,angle_before as f64,a.angle];
+            if self.model_effective_ns.is_none() {self.model_effective_ns=Some(crate::clock::now_ns());}
+            self.model_limited=a.limited;
+            a.angle as f32
+        },
+        }
+    }
+
     pub fn target(&self) -> GimbalAimTarget {
         self.target
     }
@@ -291,17 +307,7 @@ pub fn gimbal_pid_controls(
 
     (gimbal_data.local_yaw, gimbal_data.pitch, _) =
         gimbal_transform.rotation.to_euler(EulerRot::YXZ);
-    let yaw_delta = match pid.dynamics.as_str() {
-        "legacy" => yaw_rate * dt,
-        "rm2017-yaw-unitdc" => {
-            let a=tracker.yaw_model.advance(yaw_rate as f64,dt as f64,pid.yaw.max_rate as f64,true);
-            tracker.model_diagnostic=[yaw_rate as f64,a.raw_rate,a.rate,gimbal_data.local_yaw as f64,a.angle];
-            if tracker.model_effective_ns.is_none() {tracker.model_effective_ns=Some(crate::clock::now_ns());}
-            tracker.model_limited=a.limited;
-            a.angle as f32
-        },
-        _ => panic!("Unknown gimbal dynamics: {}",pid.dynamics),
-    };
+    let yaw_delta=tracker.advance_yaw(&pid.dynamics,yaw_rate,dt,pid.yaw.max_rate,gimbal_data.local_yaw);
     gimbal_data.local_yaw += yaw_delta;
     gimbal_data.pitch = (gimbal_data.pitch + pitch_rate * dt).clamp(
         -config.vehicle.gimbal_pitch_limit,
@@ -335,6 +341,86 @@ pub fn publish_gimbal_control_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrected_production_selection_retarget_reset_and_raw_gain() {
+        for (id,expected_dc) in [("rm2017-yaw-corrected-raw",1.1117948717948718),
+            ("rm2017-yaw-corrected-unitdc",1.0)] {
+            let mut tracker=GimbalAimTracker::new(GimbalAimTarget{yaw:0.0,pitch:0.0});
+            tracker.yaw.integral=0.25;tracker.feedforward=Vec2::new(0.2,0.1);
+            let first=tracker.advance_yaw(id,1.0,0.001,20.0,0.0);
+            assert!(first<0.0 && tracker.model_diagnostic[2]<0.0);
+            let state=tracker.yaw_model.x;let command=GimbalAimTarget{yaw:0.02,pitch:0.0};
+            tracker.retarget(command);assert_eq!(tracker.yaw_model.x,state);
+            tracker.advance_yaw(id,1.0,5.0,20.0,first);
+            assert!((tracker.model_diagnostic[2]-expected_dc).abs()<1e-12);
+            assert!(tracker.model_effective_ns.is_some());
+            tracker.reset_yaw_model();assert_eq!(tracker.yaw_model.x,[0.0,0.0]);
+            assert_eq!(tracker.model_diagnostic,[0.0;5]);assert!(tracker.model_effective_ns.is_none());
+            assert_eq!(tracker.yaw.integral,0.25);assert_eq!(tracker.feedforward,Vec2::new(0.2,0.1));
+            assert_eq!(tracker.target,command);
+            assert!(tracker.advance_yaw(id,1.0,0.001,20.0,0.0)<0.0);
+        }
+        let mut legacy=GimbalAimTracker::new(GimbalAimTarget{yaw:0.0,pitch:0.0});
+        assert_eq!(legacy.advance_yaw("legacy",0.3,0.002,20.0,0.0),0.3_f32*0.002_f32);
+        assert_eq!(legacy.yaw_model.x,[0.0,0.0]);
+    }
+
+    #[test]
+    fn corrected_production_history_dispatch_is_bit_exact() {
+        let mut tracker=GimbalAimTracker::new(GimbalAimTarget{yaw:0.0,pitch:0.0});
+        let mut original=super::super::yaw_reference::YawReference::default();
+        for k in 0..1000 {
+            let input=if k<300 {0.3}else if k<700 {-20.0}else{10.0};
+            let expected=original.advance(input as f64,0.002_f32 as f64,0.7_f32 as f64,true);
+            let actual=tracker.advance_yaw("rm2017-yaw-unitdc",input,0.002,0.7,0.0);
+            assert_eq!(actual,expected.angle as f32);assert_eq!(tracker.yaw_model.x,original.x);
+            assert_eq!(tracker.model_diagnostic[1],expected.raw_rate);
+            assert_eq!(tracker.model_diagnostic[2],expected.rate);
+            assert_eq!(tracker.model_limited,expected.limited);
+        }
+    }
+
+    /// Export with `cargo test ... corrected_angle_loop_csv -- --ignored --nocapture`.
+    /// This yaw-only component harness uses production AxisPid, stamped target
+    /// feedforward, angle wrapping and actuator dispatch. The local/world yaw
+    /// frames are identical. It does not simulate ECS transforms, ROS timing,
+    /// chassis motion or camera/vision; it is not a full vehicle qualification.
+    #[test]
+    #[ignore = "CSV component diagnostic; run explicitly with --nocapture"]
+    fn corrected_angle_loop_csv() {
+        println!("model,signal,ff_gain,end_t_s,target_sample_t_s,target_rad,yaw_rad,error_rad,feedback_rad_s,ff_rad_s,input_rad_s,raw_output_rad_s,output_rad_s,delta_rad,limited");
+        for id in ["legacy","rm2017-yaw-unitdc","rm2017-yaw-corrected-raw","rm2017-yaw-corrected-unitdc"] {
+            for signal in ["step","ramp","chirp"] {for gain in [0.0,1.0] {
+                let mut config=GimbalPidConfig::default();config.feedforward_gain=gain;
+                let mut tracker=GimbalAimTracker::new(GimbalAimTarget{yaw:0.0,pitch:0.0});let mut angle=0.0;
+                let dt=0.001;let mut observed_ff=false;
+                for k in 0..4000 {
+                    let t=k as f32*dt;
+                    let requested=match signal {"step"=>if t>=0.1 {0.01}else{0.0},
+                        "ramp"=>0.002*t,
+                        _=>0.001*(std::f32::consts::TAU*(0.5*t+2.4375*t*t)).sin()};
+                    // Timestamped commands at 100 Hz; actuator at 1000 Hz.
+                    // 1 ms commands would hit the estimator's >1 ms guard and
+                    // accidentally disable the feedforward diagnostic.
+                    if k%10==0 {tracker.retarget_stamped(GimbalAimTarget{yaw:requested,pitch:0.0},1_000_000_000+k as i128*1_000_000,&config);}
+                    let target=tracker.target.yaw;
+                    let error=wrap_angle(target-angle);let feedback=tracker.yaw.step(error,&config.yaw,dt);
+                    // In the yaw-only aligned frame, target world angular rate
+                    // maps directly to local yaw; same timestamped estimator.
+                    let ff=tracker.feedforward.x*config.feedforward_gain;
+                    observed_ff|=ff.abs()>1e-8;
+                    let input=(feedback+ff).clamp(-config.yaw.max_rate,config.yaw.max_rate);
+                    let delta=tracker.advance_yaw(id,input,dt,config.yaw.max_rate,angle);angle+=delta;
+                    assert!(angle.is_finite() && delta.is_finite());
+                    let (raw,output)=if id=="legacy" {(input as f64,input as f64)}else{(tracker.model_diagnostic[1],tracker.model_diagnostic[2])};
+                    assert!(output.abs()<=config.yaw.max_rate as f64);
+                    println!("{id},{signal},{gain},{},{},{target},{angle},{error},{feedback},{ff},{input},{raw},{output},{delta},{}",t+dt,(k/10*10) as f32*dt,tracker.model_limited);
+                }
+                if gain!=0.0 {assert!(observed_ff,"feedforward case must actually activate");}
+            }}
+        }
+    }
 
     #[test]
     fn reference_reset_retarget_wrap_and_long_gap() {
