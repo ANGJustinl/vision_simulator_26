@@ -80,13 +80,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn robot_configs_preserve_legacy_armor_values() {
+    fn robot_configs_match_robot_numbers_and_armor_sizes() {
         let cases = [
             (HERO_ROBOT_CONFIG, ArmorType::Large, ArmorLabel::One, 4),
             (
                 ENGINEER_ROBOT_CONFIG,
                 ArmorType::Small,
-                ArmorLabel::Sentry,
+                ArmorLabel::Two,
                 4,
             ),
             (

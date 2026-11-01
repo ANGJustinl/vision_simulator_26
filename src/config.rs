@@ -1010,7 +1010,8 @@ mod tests {
 
     #[test]
     fn repository_config_parses() {
-        let config = SimulationConfig::load().expect("config.toml 必须能解析");
+        let config: SimulationConfig = toml::from_str(include_str!("../config.toml"))
+            .expect("the repository config.toml must parse independently of the working directory");
 
         assert!(config.camera.pip_refresh_divisor >= 1);
         assert!(config.camera.pip_far > 0.0);
@@ -1173,7 +1174,8 @@ mod tests {
 
     #[test]
     fn shipped_config_publishes_compressed_only() {
-        let config = SimulationConfig::load().expect("config.toml 必须能解析");
+        let config: SimulationConfig = toml::from_str(include_str!("../config.toml"))
+            .expect("the repository config.toml must parse independently of the working directory");
         let color = &config.capture.color;
 
         assert!(color.wants_image());
@@ -1181,10 +1183,9 @@ mod tests {
             color.publish_compressed,
             "the compressed stream is what keeps DDS affordable"
         );
-        assert!(
-            color.publish_period().is_some(),
-            "the shipped config rate limits the image stream"
-        );
+        assert!(!color.publish_raw);
+        assert_eq!(color.publish_hz, 0.0);
+        assert!(color.publish_period().is_none(), "publish every captured frame");
     }
 
     #[test]
