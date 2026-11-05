@@ -43,9 +43,12 @@ pub fn poll_control(
     config: Res<crate::config::SimulationConfig>,
     scene: Option<Res<crate::bench::scenario::Scenario>>,
     sequence: Res<SensorSequence>,
-    input: Res<crate::ros2::topic::TopicSubscriber<crate::ros2::topic::bench_topics::SimSensorControlTopic>>,
-    output: Res<crate::ros2::topic::TopicPublisher<crate::ros2::topic::bench_topics::SimSensorStateTopic>>,
+    input: Option<Res<crate::ros2::topic::TopicSubscriber<crate::ros2::topic::bench_topics::SimSensorControlTopic>>>,
+    output: Option<Res<crate::ros2::topic::TopicPublisher<crate::ros2::topic::bench_topics::SimSensorStateTopic>>>,
 ) {
+    // The lens plugin can run without ROS. Do not consume a reset unless its
+    // acknowledgement channel exists as well.
+    let (Some(input), Some(output)) = (input, output) else { return; };
     while let Some(message)=input.try_recv() {
         let Ok(value)=serde_json::from_str::<serde_json::Value>(&message.data) else {continue;};
         let Some(id)=value["reset_id"].as_str().filter(|id|!id.is_empty() && id.len()<=64) else {continue;};
@@ -55,5 +58,28 @@ pub fn poll_control(
             output.publish(r2r::std_msgs::msg::String{data:serde_json::json!({"version":1,"kind":"reset",
                 "reset_id":id,"seed":seed,"stamp_ns":crate::clock::now_ns() as i64}).to_string()});
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_and_duplicate_captures_cannot_advance_a_new_session() {
+        let sequence = SensorSequence::default();
+        sequence.reset("old".into(), 1);
+        let old = sequence.current();
+        sequence.reset("new".into(), 2);
+        sequence.captured(&old);
+        assert_eq!(sequence.current().index, 0);
+        let new = sequence.current();
+        sequence.captured(&new);
+        sequence.captured(&new);
+        let current = sequence.current();
+        assert_eq!(current.reset_id, "new");
+        assert_eq!(current.seed, Some(2));
+        assert_eq!(current.index, 1);
+        assert_eq!(current.phase, phase(2, 1));
     }
 }
