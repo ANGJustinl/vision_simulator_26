@@ -86,7 +86,8 @@ fn render_plugin_for_platform() -> RenderPlugin {
             render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                 instance_flags: InstanceFlags::default()
                     | InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
-                priority: WgpuSettingsPriority::Functionality,
+                priority: bevy::render::settings::settings_priority_from_env()
+                    .unwrap_or(WgpuSettingsPriority::Functionality),
                 ..default()
             })),
             ..default()
