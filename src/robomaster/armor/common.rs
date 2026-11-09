@@ -154,7 +154,7 @@ pub const LARGE_ARMOR_STICKER_SLOTS: [ArmorStickerSlot; 5] = [
         name_suffix: "1",
     },
     ArmorStickerSlot {
-        label: ArmorLabel::Base,
+        label: ArmorLabel::Three,
         name_suffix: "3",
     },
     ArmorStickerSlot {
@@ -253,11 +253,22 @@ mod tests {
         assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Outpost), 5);
         assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Base), 6);
         assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Five), 7);
-        assert_eq!(ArmorLabel::index_from_small(ArmorLabel::Base), 8);
+        let sequence = ArmorLabel::sequence_small();
+        let unique: std::collections::HashSet<_> = sequence.iter().collect();
+        assert_eq!(unique.len(), sequence.len());
+        for (index, &label) in sequence.iter().enumerate() {
+            assert_eq!(ArmorLabel::index_from_small(label), index);
+        }
     }
 
     #[test]
     fn sticker_slot_tables_keep_asset_suffixes() {
+        for slots in [&SMALL_ARMOR_STICKER_SLOTS[..], &LARGE_ARMOR_STICKER_SLOTS[..]] {
+            let labels: std::collections::HashSet<_> = slots.iter().map(|s| s.label).collect();
+            let suffixes: std::collections::HashSet<_> = slots.iter().map(|s| s.name_suffix).collect();
+            assert_eq!(labels.len(), slots.len(), "one visible sticker per label");
+            assert_eq!(suffixes.len(), slots.len());
+        }
         assert_eq!(
             ArmorSpec::Small(SmallArmorLabel::Outpost).sticker_slots(),
             &[

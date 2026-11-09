@@ -368,7 +368,10 @@ pub fn update_auto_aim_subscription(
     controller: Res<ControllerState>,
     enabled: Res<SubscribeAutoAim>,
 ) {
-    let active = controller.auto_aim_active();
+    // Integration owns the switch through valid/invalid ROS commands. A stray
+    // F5 press must not make the argument-based control interface ineffective.
+    let active = std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|value| value == "1")
+        || controller.auto_aim_active();
     if enabled.swap(active, Ordering::AcqRel) != active {
         info!(
             "Auto-aim subscription is now {}.",

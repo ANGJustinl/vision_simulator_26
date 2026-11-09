@@ -88,6 +88,7 @@ fn schedule_frame(
 /// Sleeps out the rest of the frame budget. Runs in `Last`, after every system
 /// that does work, so the sleep is what actually caps the loop.
 fn limit_frame_rate(config: Res<SimulationConfig>, mut limiter: ResMut<FrameLimiter>) {
+    if crate::clock::enabled() {return;}
     let Some(interval) = config.performance.frame_interval() else {
         // Uncapped: forget the deadline so re-enabling starts a fresh cadence.
         limiter.deadline = None;

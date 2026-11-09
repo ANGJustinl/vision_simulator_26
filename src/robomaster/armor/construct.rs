@@ -244,6 +244,9 @@ impl ArmorConstructor<'_, '_> {
                         spec: armor_data.spec,
                         label: armor_data.spec.label(),
                     });
+                    if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|v| v == "1") {
+                        self.commands.entity(armor_elem).insert(avian3d::prelude::SpeculativeMargin::ZERO);
+                    }
                 });
         }
         //let _base = query!(root_query, .."BASE")?;

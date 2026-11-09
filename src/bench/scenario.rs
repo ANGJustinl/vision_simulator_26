@@ -158,6 +158,8 @@ pub enum ScenarioCommand {
     Reset,
     /// Full restart: same physical reset, then `Running` at `t_scenario = 0`.
     Restart,
+    /// Start the clock on a prepared, settled Idle scene without teleporting.
+    Begin,
 }
 
 impl ScenarioCommand {
@@ -167,6 +169,7 @@ impl ScenarioCommand {
             Self::Load => "load",
             Self::Reset => "reset",
             Self::Restart => "restart",
+            Self::Begin => "begin",
         }
     }
 }
@@ -419,6 +422,9 @@ impl SegmentSpec {
             "line" => Ok(Primitive::Line {
                 v: self.required("v", self.v)?,
                 dir_deg: self.required("dir_deg", self.dir_deg)?,
+            }),
+            "strafe_spin" => Ok(Primitive::StrafeSpin {
+                v:self.required("v",self.v)?,dir_deg:self.required("dir_deg",self.dir_deg)?,omega:self.required("omega",self.omega)?,
             }),
             "strafe" => Ok(Primitive::Strafe {
                 v: self.required("v", self.v)?,
@@ -885,6 +891,19 @@ impl Scenario {
     /// in [`scenario_control`], which owns those queries; this only touches the
     /// scenario's own state, so the two halves cannot drift apart.
     pub fn apply_command(&mut self, command: ScenarioCommand, fixed_now: f64) {
+        if command == ScenarioCommand::Begin {
+            self.origin_fixed_secs = Some(fixed_now);
+            self.t_scenario = 0.0;
+            self.phase = Phase::Running;
+            self.auto_start_suppressed = false;
+            self.max_track_deviation_m = 0.0;
+            self.max_along_track_m = 0.0;
+            for robot in &mut self.robots {
+                robot.origin = None;
+                robot.deviation_skip_frames = SPAWN_DEVIATION_SKIP_FRAMES;
+            }
+            return;
+        }
         let restart = command == ScenarioCommand::Restart;
         self.origin_fixed_secs = if restart { Some(fixed_now) } else { None };
         self.t_scenario = 0.0;
@@ -1210,6 +1229,22 @@ fn apply_runtime_command(
     scripted: &Query<(Entity, &RobotId), (With<Infantry>, With<MotionSource>)>,
     robot_inputs: &mut RobotInputs,
 ) {
+    if command == ScenarioCommand::Begin {
+        // Preparation has already placed and settled the bodies and homed the
+        // gimbal. Preserve that state and only arm the scripted motion/clock.
+        for (entity, id, ..) in roots.iter_mut() {
+            if scenario.robots.iter().any(|robot| robot.id == *id) {
+                commands.entity(entity).insert(MotionSource::SCRIPTED);
+                commands.entity(entity).remove::<ActiveSlapper>();
+                for descendant in children.iter_descendants(entity) {
+                    commands.entity(descendant).remove::<ActiveSlapper>();
+                }
+                robot_inputs.remove(*id);
+            }
+        }
+        scenario.apply_command(command, fixed_now);
+        return;
+    }
     // 1. Drop every scripted driver in the world.
     for (entity, id) in scripted.iter() {
         commands.entity(entity).remove::<MotionSource>();
@@ -1629,6 +1664,7 @@ pub fn scenario_control(
         &GlobalTransform,
     ), Without<Infantry>>,
     children: Query<&Children>,
+    mut trackers: Query<&mut crate::systems::GimbalAimTracker>,
 ) {
     let Some(scenario) = scenario.as_mut() else {
         return;
@@ -1651,6 +1687,9 @@ pub fn scenario_control(
     // so a restart rebuilds the spawn and the scripted driver from a clean slate.
     let command = std::mem::take(&mut scenario.pending);
     if command != ScenarioCommand::None {
+        if crate::systems::yaw_reference::ReferenceModel::from_id(&config.vehicle.gimbal_pid.dynamics).is_some() {
+            for mut tracker in &mut trackers {tracker.reset_yaw_model();}
+        }
         apply_runtime_command(
             scenario,
             command,
@@ -1952,7 +1991,7 @@ pub fn publish_scenario_status(
         return;
     };
     let fixed_now = time_fixed.elapsed_secs_f64();
-    if fixed_now - scenario.status_last_secs < 1.0 / STATUS_HZ {
+    if !crate::clock::observing() && fixed_now - scenario.status_last_secs < 1.0 / STATUS_HZ {
         return;
     }
     scenario.status_last_secs = fixed_now;

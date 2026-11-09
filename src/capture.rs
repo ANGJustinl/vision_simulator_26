@@ -1,6 +1,7 @@
 pub mod depth;
 pub mod driver;
 pub mod effect;
+pub mod sensor;
 pub mod view_copy;
 
 use bevy::camera::RenderTarget;

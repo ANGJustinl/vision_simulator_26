@@ -14,3 +14,5 @@ float32[3] pos              # plate centre, map frame, meters
 float32[3] normal           # plate normal, pointing out of the vehicle
 float32 plate_w             # plate width (m)
 float32 plate_h             # plate height (m)
+bool line_of_sight_clear    # physics ray to plate centre, ignoring ego and target's own collision envelope
+bool visibility_valid      # camera and physics query were available; FOV/front-face tested by evaluator

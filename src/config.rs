@@ -10,6 +10,8 @@ use std::time::Duration;
 #[reflect(Resource)]
 pub struct SimulationConfig {
     #[serde(default)]
+    pub scene: SceneConfig,
+    #[serde(default)]
     pub window: WindowConfig,
     #[serde(default)]
     pub performance: PerformanceConfig,
@@ -31,6 +33,21 @@ pub struct SimulationConfig {
     pub camera: CameraConfig,
     #[serde(default)]
     pub bench: BenchConfig,
+}
+
+#[derive(Deserialize, Reflect, Clone, Copy, Default, PartialEq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum Terrain {
+    #[default]
+    Arena,
+    FlatRange,
+}
+
+#[derive(Deserialize, Reflect, Clone, Default)]
+#[serde(default)]
+pub struct SceneConfig {
+    /// Scene topology is chosen at startup; changing it requires a restart.
+    pub terrain: Terrain,
 }
 
 /// Benchmark v2 knobs, from `config.toml` → `[bench]`.
@@ -105,12 +122,16 @@ impl BenchConfig {
 
 #[derive(Deserialize, Reflect, Clone)]
 pub struct WindowConfig {
+    /// Startup-only: render capture textures without a display server.
+    #[serde(default)]
+    pub headless: bool,
     pub present_mode: String,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
+            headless: false,
             // Uncap rendering by default so off-screen capture (Talos/ROS2) can exceed 60Hz.
             present_mode: "auto_no_vsync".to_string(),
         }
@@ -306,13 +327,28 @@ impl Default for VehicleConfig {
 #[derive(Deserialize, Reflect, Clone)]
 #[serde(default)]
 pub struct GimbalPidConfig {
+    pub dynamics: String,
     pub yaw: GimbalAxisPidConfig,
     pub pitch: GimbalAxisPidConfig,
+    /// Opt-in controller experiments; defaults preserve the render-frame loop.
+    pub fixed_update: bool,
+    pub feedforward_gain: f32,
+    pub feedforward_tau_s: f32,
+    pub feedforward_max_rate: f32,
+    pub feedforward_reset_gap_s: f32,
+    pub feedforward_max_step_rad: f32,
 }
 
 impl Default for GimbalPidConfig {
     fn default() -> Self {
         Self {
+            dynamics: "legacy".into(),
+            fixed_update: false,
+            feedforward_gain: 0.0,
+            feedforward_tau_s: 0.06,
+            feedforward_max_rate: 0.6,
+            feedforward_reset_gap_s: 0.15,
+            feedforward_max_step_rad: 0.06,
             yaw: GimbalAxisPidConfig {
                 kp: 12.0,
                 ki: 0.5,
@@ -537,6 +573,8 @@ pub struct CaptureEffectConfig {
     /// and keep the lens: grain raises the entropy of every frame, which at
     /// `[capture.color] jpeg_quality` costs image bytes and encode time.
     pub grain: f32,
+    /// Explicit native sensor stream; None preserves the elapsed-clock model.
+    pub sensor_seed: Option<u32>,
 }
 
 impl Default for CaptureEffectConfig {
@@ -551,6 +589,7 @@ impl Default for CaptureEffectConfig {
             lens_distortion: 0.0,
             lens_distortion_scale: 1.0,
             grain: 0.05,
+            sensor_seed: None,
         }
     }
 }
@@ -796,6 +835,7 @@ impl Default for SimulationConfig {
         Self::load().unwrap_or_else(|e| {
             warn!("Failed to load config.toml: {}, using defaults", e);
             Self {
+                scene: SceneConfig::default(),
                 window: WindowConfig::default(),
                 performance: PerformanceConfig::default(),
                 debug: DebugConfig::default(),
@@ -970,7 +1010,8 @@ mod tests {
 
     #[test]
     fn repository_config_parses() {
-        let config = SimulationConfig::load().expect("config.toml 必须能解析");
+        let config: SimulationConfig = toml::from_str(include_str!("../config.toml"))
+            .expect("the repository config.toml must parse independently of the working directory");
 
         assert!(config.camera.pip_refresh_divisor >= 1);
         assert!(config.camera.pip_far > 0.0);
@@ -1133,7 +1174,8 @@ mod tests {
 
     #[test]
     fn shipped_config_publishes_compressed_only() {
-        let config = SimulationConfig::load().expect("config.toml 必须能解析");
+        let config: SimulationConfig = toml::from_str(include_str!("../config.toml"))
+            .expect("the repository config.toml must parse independently of the working directory");
         let color = &config.capture.color;
 
         assert!(color.wants_image());
@@ -1141,10 +1183,9 @@ mod tests {
             color.publish_compressed,
             "the compressed stream is what keeps DDS affordable"
         );
-        assert!(
-            color.publish_period().is_some(),
-            "the shipped config rate limits the image stream"
-        );
+        assert!(!color.publish_raw);
+        assert_eq!(color.publish_hz, 0.0);
+        assert!(color.publish_period().is_none(), "publish every captured frame");
     }
 
     #[test]

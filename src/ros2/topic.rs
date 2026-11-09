@@ -265,7 +265,7 @@ macro_rules! topic {
         )*
 
         pub fn register_sub(atomic:Arc<AtomicBool>, app:&mut App, node:&mut Node) {
-            $crate::subscriber!(atomic, app, node, $($topic,)*);
+            $crate::subscriber!(atomic.clone(), app, node, $($topic,)*);
         }
         topic!($($remaining)*);
     };
@@ -311,6 +311,7 @@ topic!(
         // stream, i.e. every pulse survives a frame; on overflow the oldest goes
         // first and `TopicSubscriber::dropped()` counts it.
         "/rm_gimbal/cmd" as GimbalCmd as GimbalCmdTopic queue 32 with QosProfile::sensor_data();
+        "/sim/aim/fire_eligibility" as RosString as FireEligibilityTopic queue 32 with QosProfile::sensor_data();
     }
 );
 
@@ -347,7 +348,23 @@ pub mod bench_topics {
                 with QosProfile::default().reliable().keep_last(32);
             "/sim/events/hit" as SimEvent as SimHitEventTopic queue 32
                 with QosProfile::default().reliable().keep_last(32);
+            "/sim/projectiles/trace" as r2r::std_msgs::msg::String as SimProjectileTraceTopic queue 32
+                with QosProfile::default().reliable().keep_last(32);
+            "/sim/projectiles/settlement" as r2r::std_msgs::msg::String as SimSettlementTopic queue 32
+                with QosProfile::default().reliable().keep_last(32);
+            "/sim/gimbal/trace" as r2r::std_msgs::msg::String as SimGimbalTraceTopic queue 8
+                with QosProfile::sensor_data().best_effort().keep_last(8);
             "/sim/scenario/status" as SimScenarioStatus as SimScenarioStatusTopic queue 4
+                with QosProfile::sensor_data().best_effort().keep_last(4);
+            "/sim/scenario/boundary" as r2r::std_msgs::msg::String as SimScenarioBoundaryTopic queue 32
+                with QosProfile::default().reliable().keep_last(32);
+            "/sim/camera/sensor" as r2r::std_msgs::msg::String as SimSensorStateTopic queue 64
+                with QosProfile::default().reliable().keep_last(64);
+        }
+        sub {
+            "/sim/camera/sensor_control" as r2r::std_msgs::msg::String as SimSensorControlTopic queue 4
+                with QosProfile::default().reliable().keep_last(4);
+            "/sim/bench/continuous_fire" as r2r::std_msgs::msg::String as SimContinuousFireTopic queue 4
                 with QosProfile::sensor_data().best_effort().keep_last(4);
         }
     );
@@ -356,6 +373,85 @@ pub mod bench_topics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "bench")]
+    #[test]
+    fn sensor_control_requires_both_endpoints_and_acknowledges_idle_resets() {
+        use bevy::prelude::*;
+        use crate::bench::{motion::MotionLimits, scenario::{Phase, Scenario}};
+        use crate::capture::sensor::{poll_control, SensorSequence};
+        use crate::config::SimulationConfig;
+        use super::bench_topics::{SimSensorControlTopic, SimSensorStateTopic};
+
+        for (has_input, has_output) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut app = App::new();
+            let mut config = SimulationConfig::default();
+            config.capture.effect.sensor_seed = Some(42);
+            let scenario = Scenario::parse(
+                "id = 'sensor-test'\nseed = 1\nduration = 1.0\ntrigger = 'on_first_gimbal_cmd'\n\
+                 [[robot]]\nid = 1\n[[robot.segment]]\nt0 = 0.0\nt1 = 1.0\ntype = 'static'\n",
+                &MotionLimits::default(),
+            ).unwrap();
+            assert_eq!(scenario.phase, Phase::Idle);
+            let input = TopicSubscriber::<SimSensorControlTopic>::new();
+            let incoming = input.mailbox.clone();
+            let outgoing = Arc::new(Mailbox::new(16));
+            app.insert_resource(config).insert_resource(scenario)
+                .init_resource::<SensorSequence>().add_systems(Update, poll_control);
+            if has_input { app.insert_resource(input); }
+            if has_output {
+                app.insert_resource(TopicPublisher::<SimSensorStateTopic>::new(outgoing.clone()));
+            }
+            let request = |id: &str| RosString { data: serde_json::json!({"reset_id": id}).to_string() };
+            incoming.push(request("first"));
+            app.update();
+            let sequence = app.world().resource::<SensorSequence>().clone();
+            if !(has_input && has_output) {
+                assert!(sequence.current().seed.is_none());
+                assert_eq!(incoming.len(), 1, "do not consume a reset without an acknowledgement channel");
+                assert!(outgoing.try_pop().is_none());
+                continue;
+            }
+            let reply: serde_json::Value = serde_json::from_str(&outgoing.try_pop().unwrap().data).unwrap();
+            assert_eq!(reply["reset_id"], "first");
+            assert_eq!(reply["seed"], 42);
+            assert_eq!(reply["kind"], "reset");
+            assert_eq!(reply["version"], 1);
+            sequence.captured(&sequence.current());
+            incoming.push(request("first"));
+            app.update();
+            assert_eq!(sequence.current().index, 1, "repeated reset is idempotent");
+            assert!(outgoing.try_pop().is_some(), "retries receive an acknowledgement");
+
+            app.world_mut().resource_mut::<Scenario>().phase = Phase::Running;
+            incoming.push(request("during-run"));
+            app.update();
+            assert_eq!(sequence.current().reset_id, "first");
+            assert!(outgoing.try_pop().is_none());
+
+            app.world_mut().resource_mut::<Scenario>().phase = Phase::Idle;
+            let old_frame = sequence.current();
+            incoming.push(request("second"));
+            app.update();
+            assert_eq!(sequence.current().reset_id, "second");
+            assert_eq!(sequence.current().index, 0);
+            assert!(outgoing.try_pop().is_some());
+            sequence.captured(&old_frame);
+            assert_eq!(sequence.current().index, 0);
+
+            for data in ["invalid json".to_string(), request("").data, request(&"x".repeat(65)).data] {
+                incoming.push(RosString { data });
+            }
+            app.update();
+            assert_eq!(sequence.current().reset_id, "second");
+            assert!(outgoing.try_pop().is_none());
+            app.world_mut().remove_resource::<Scenario>();
+            incoming.push(request("no-scene"));
+            app.update();
+            assert_eq!(sequence.current().reset_id, "second");
+            assert!(outgoing.try_pop().is_none());
+        }
+    }
 
     #[test]
     fn mailbox_keeps_only_the_newest_when_full() {

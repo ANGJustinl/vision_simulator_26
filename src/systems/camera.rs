@@ -16,6 +16,10 @@ use crate::systems::ControllerState;
 const INSET_BORDER_COLOR: Color = Color::srgba(1.0, 1.0, 1.0, 0.35);
 
 pub fn following_controls(mut mode: ResMut<CameraMode>, controller: Res<ControllerState>) {
+    if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|value| value == "1") {
+        mode.0 = FollowingType::Robot;
+        return;
+    }
     if controller.controlled.switch_camera_just_pressed {
         mode.0 = match mode.0 {
             FollowingType::Free => FollowingType::Robot,
@@ -26,6 +30,10 @@ pub fn following_controls(mut mode: ResMut<CameraMode>, controller: Res<Controll
 }
 
 pub fn focus_controls(controller: Res<ControllerState>, mut focus: ResMut<CameraFocus>) {
+    if std::env::var("DAEDALUS_INTEGRATION").is_ok_and(|value| value == "1") {
+        *focus = CameraFocus::Own;
+        return;
+    }
     if controller.controlled.switch_focus_just_pressed {
         focus.toggle();
     }
